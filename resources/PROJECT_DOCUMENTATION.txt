@@ -1,0 +1,793 @@
+================================================================================
+  VI_PIPELINE  |  Project Execution Documentation
+  Version 1.2  |  Forensic Genomic Variant Prioritisation
+  Genome build : GRCh38
+  Scope        : Single sample, SNVs and small indels
+================================================================================
+
+
+CONTENTS
+--------
+  1.  Project Purpose and Scope
+  2.  Architecture Overview
+  3.  Repository Layout
+  4.  Module Reference
+       4a. Setup modules
+       4b. Analysis modules (upstream)
+       4c. Analysis modules (core)
+       4d. ACMG/AMP classification
+       4e. Reporting modules
+       4f. GUI modules
+  5.  Full Data Flow
+  6.  Tool Integration Details
+  7.  Configuration System
+  8.  Testing Strategy
+  9.  Key Design Decisions
+  10. Output File Reference
+  11. Known Limitations (v1.2)
+
+
+--------------------------------------------------------------------------------
+1.  PROJECT PURPOSE AND SCOPE
+--------------------------------------------------------------------------------
+
+VI_Pipeline was built to support forensic genomic investigation. Given genomic
+data from an individual (raw reads or a pre-called variant file), the pipeline:
+
+  - Produces a standardised, reproducible variant call set aligned to GRCh38
+  - Annotates every variant with functional consequence, population frequency,
+    clinical significance (ClinVar), and in-silico pathogenicity scores
+  - Applies a curated subset of ACMG/AMP classification criteria
+  - Ranks candidates by a composite priority score weighted towards clinically
+    meaningful signals
+  - Generates review-ready reports in PDF, Excel, TSV, and JSON
+
+The v1.2 pipeline supports two input modes:
+  - FASTQ-first: raw reads -> BWA alignment -> DeepVariant -> VCF -> downstream
+  - VCF-first: a pre-called VCF (annotated or unannotated) -> downstream
+
+BAM/CRAM input is not supported in v1.2.
+
+
+--------------------------------------------------------------------------------
+2.  ARCHITECTURE OVERVIEW
+--------------------------------------------------------------------------------
+
+The pipeline is organised as a set of layered Python modules. No pipeline logic
+lives in the CLI or GUI — those are thin entry points only.
+
+                    +---------------------------------------------+
+                    |          Entry points                        |
+                    |   cli.py          launch_gui.py              |
+                    |   (argparse)      (tkinter App)              |
+                    +---------------------------------------------+
+                                          |
+          +---------------+--------------+--------------+----------+
+          |               |              |              |          |
+          v               v              v              v          v
+    +----------+  +------------+  +-----------+  +---------+ +--------+
+    |  setup/  |  | analysis/  |  | analysis/ |  | analysis| | repor- |
+    |          |  | upstream/  |  | (core)    |  | /acmg/  | | ting/  |
+    | tool_    |  | fastq_     |  | input_    |  | rules   | | pdf    |
+    | checker  |  | handler    |  | router    |  | classif | | xlsx   |
+    | resource_|  | (bwa+DV)   |  | vcf_      |  | er      | | tsv    |
+    | checker  |  +------------+  | validator |  +---------+ | json   |
+    | config_  |                  | vcf_norm- |              +--------+
+    | writer   |                  | alizer    |
+    | setup_   |                  | annotator |
+    | runner   |                  | parser    |
+    +----------+                  | filter_   |
+                                  | engine    |
+                                  | ranker    |
+                                  +-----------+
+
+All intermediate and final files are written under the user-specified output
+directory. Nothing is written to the source tree at analysis time.
+
+
+--------------------------------------------------------------------------------
+3.  REPOSITORY LAYOUT
+--------------------------------------------------------------------------------
+
+VI_Pipeline/
+  cli.py                    Command-line entry point
+  launch_gui.py             Desktop GUI launcher
+
+  config/
+    settings.yaml           Analysis parameters (filtering, ACMG, ranking, VEP,
+                             DeepVariant, reporting). Edit freely.
+    paths.yaml              Tool and resource paths. Written by setup; resource
+                             paths are edited by the user before first run.
+    gene_list.txt           Default gene list (one HGNC symbol per line)
+
+  setup/
+    setup_runner.py         Orchestrates full setup check sequence
+    tool_checker.py         Locates and version-checks each required tool
+    resource_checker.py     Validates resource files and directories
+    config_writer.py        Writes and reads config/paths.yaml
+
+  analysis/
+    input_router.py         Detects input file type (FASTQ / VCF / BAM)
+    vcf_validator.py        Validates VCF format, detects CSQ annotation
+    vcf_normalizer.py       Splits multi-allelic records (bcftools norm)
+    annotator.py            Builds and executes VEP CLI command
+    parser.py               Parses VEP CSQ field into Variant objects
+    filter_engine.py        Applies AF, PASS, consequence, and ClinVar filters
+    ranker.py               Composite priority scoring
+
+    upstream/
+      fastq_handler.py      BWA alignment + DeepVariant variant calling
+
+    acmg/
+      rules.py              Individual ACMG/AMP rule functions
+      evidence_codes.py     Evidence code catalogue and classification logic
+      classifier.py         Applies rules to variants; assigns P/LP/VUS/LB/B
+
+  reporting/
+    pdf_report.py           A4 landscape PDF (ReportLab)
+    spreadsheet.py          Excel .xlsx (openpyxl)
+    tsv_export.py           Tab-separated text
+    json_export.py          Machine-readable JSON
+    run_log.py              Structured audit log per run
+
+  gui/
+    app.py                  Main tkinter application window
+    runner.py               Background thread that executes cli.py
+    validation.py           Input validation (pure functions, no tkinter state)
+
+  tests/                    Pytest test suite (mirrors source layout)
+
+  USER_GUIDE.txt            End-user guide
+  PROJECT_DOCUMENTATION.txt This file
+
+
+--------------------------------------------------------------------------------
+4.  MODULE REFERENCE
+--------------------------------------------------------------------------------
+
+4a. SETUP MODULES
+-----------------
+
+setup/tool_checker.py
+  Checks: docker, vep, bcftools, bgzip, tabix, python, conda, nextflow
+  Method: shutil.which() → version command → regex version parse → min check
+  Class:  ToolCheckResult  (path, version_parsed, status, message)
+  Public: check_tool(tool, hint_path) -> ToolCheckResult
+          check_all_tools(hint_paths) -> Dict[str, ToolCheckResult]
+
+setup/resource_checker.py
+  Checks: reference_fasta (.fai companion), vep_cache_dir, vep_plugins_dir,
+          bwa_index_prefix (all 5 index files + .bwt size threshold),
+          cadd_snv_file, cadd_indel_file, revel_file, spliceai_snv_file,
+          spliceai_indel_file, dbnsfp_file, alphamissense_file, clinvar_vcf
+  Status values: found | missing | not_provided | bad_format
+  Class:  ResourceCheckResult (status, path, required, messages, resource)
+  Public: check_resource(name, path) -> ResourceCheckResult
+          check_all_resources(paths_dict) -> Dict[str, ResourceCheckResult]
+  Note:   RESOURCE_SPEC dict defines type (file/dir/prefix), required flag,
+          companion index checks, and user_hint for download guidance.
+
+setup/config_writer.py
+  Writes config/paths.yaml after setup completes.
+  Reads paths.yaml for subsequent runs (load_paths()).
+  Includes human-readable notes from RESOURCE_SPEC.user_hint in paths.yaml
+  so users know what files to download.
+  Public: write_paths(tool_results, resource_results, version, success)
+          load_paths() -> dict
+          assert_setup_complete() -> dict  (raises RuntimeError if not done)
+
+setup/setup_runner.py
+  Orchestrates:  check_all_tools() -> check_all_resources() -> write_paths()
+  Prints beginner-friendly [OK] / [WARN] / [FAIL] output.
+  Prints download/configure guidance for any optional resources not provided.
+  Returns True if all required checks passed.
+
+
+4b. UPSTREAM ANALYSIS (FASTQ PATH)
+------------------------------------
+
+analysis/upstream/fastq_handler.py
+  Entry: run_fastq_to_vcf(fastq_r1, fastq_r2, sample_id, output_dir,
+                           paths_config, settings) -> str (vcf.gz path)
+
+  Step 1 — Locate tools
+    _require_tool("bwa")       via shutil.which; raises RuntimeError if absent
+    _require_tool("samtools")  via shutil.which; raises RuntimeError if absent
+    _get_docker(paths_config)  from paths_config or shutil.which
+
+  Step 2 — Locate reference data
+    _get_reference_fasta(paths_config)   reads resources.reference_fasta
+    _get_bwa_index_prefix(paths_config, fasta_path)
+      Priority: paths_config.resources.bwa_index_prefix (status=found)
+                -> fallback: all 5 index files alongside FASTA
+                -> raises RuntimeError if neither found
+
+  Step 3 — Read DeepVariant settings from settings.deepvariant (with fallbacks)
+    version       (default "1.6.1")
+    model_type    (default "WGS")
+    num_shards    (default 4)
+    timeout_hours (default 12)
+
+  Step 4 — BWA MEM alignment + samtools sort
+    _run_bwa_align(bwa, samtools, index, r1, r2, sample_id, sorted_bam, threads)
+    Command:
+      bwa mem -t {threads} -R "@RG\tID:{id}\tSM:{id}\tPL:ILLUMINA\tLB:{id}"
+              {bwa_index} R1.fastq.gz [R2.fastq.gz]
+      | samtools sort -@ {threads} -o {sample}.sorted.bam
+    Timeout: 12 hours
+    Errors checked: non-zero exit, TimeoutExpired, FileNotFoundError,
+                    sorted BAM not produced
+
+  Step 5 — BAM indexing
+    _run_samtools_index(samtools, sorted_bam)
+    Command: samtools index {sorted_bam}
+    Timeout: 30 minutes
+
+  Step 6 — DeepVariant variant calling (Docker)
+    _run_deepvariant(docker, fasta, bam, out_dir, sample_id, shards,
+                     model_type, version, timeout)
+    Docker command:
+      docker run --rm --user {uid}:{gid}
+             -v {out_dir}:/workdir
+             [-v {fasta_dir}:/ref:ro]
+             google/deepvariant:{version}
+             /opt/deepvariant/bin/run_deepvariant
+             --model_type={model_type}
+             --ref=/ref/{fasta_name}  (or /workdir/{fasta_name} if same dir)
+             --reads=/workdir/{sample}.sorted.bam
+             --output_vcf=/workdir/{sample}.dv.vcf.gz
+             --num_shards={shards}
+    Output: {out_dir}/{sample}.dv.vcf.gz  (bgzipped VCF)
+    Volume design: out_dir always mounted as /workdir (rw); fasta directory
+                   mounted as /ref (ro) only if distinct from out_dir, to avoid
+                   Docker mounting the same host path twice.
+    User flag: --user uid:gid ensures output files are owned by the calling
+               user, not Docker's root.
+    Errors checked: non-zero exit, TimeoutExpired, FileNotFoundError,
+                    output VCF not produced
+
+
+4c. CORE ANALYSIS MODULES
+---------------------------
+
+analysis/input_router.py
+  detect_input_type(path) -> InputType
+  InputType enum: VCF | VCF_GZ | FASTQ | BAM_CRAM | UNKNOWN
+  Detection is extension-based:
+    .vcf                     -> VCF
+    .vcf.gz / .bcf           -> VCF_GZ
+    .fastq / .fastq.gz
+    .fq   / .fq.gz           -> FASTQ
+    .bam  / .cram            -> BAM_CRAM
+
+analysis/vcf_validator.py
+  validate_vcf(path, paths_config)
+    Checks: file exists, is readable, has ##fileformat header,
+            FILTER/contig headers present, at least one data record
+  has_csq_annotation(path) -> bool
+    Reads ##INFO=<ID=CSQ header line; returns True if found
+  has_multiallelic_records(path) -> bool
+    Scans ALT column for comma-separated alleles
+
+analysis/vcf_normalizer.py
+  normalize_vcf(input_vcf, output_vcf, paths_config) -> str
+  Command: bcftools norm -m -any {input_vcf} -o {output_vcf}
+  Splits multi-allelic records into one alt per line before VEP annotation.
+  Subsequent bgzip + tabix indexing applied when output is .gz.
+
+analysis/annotator.py
+  Entry: annotate(input_vcf, output_vcf, paths_config, settings) -> str
+  Builds the VEP command via build_vep_command(), executes via run_vep().
+  Skip guard: if output already exists and has a valid CSQ header, VEP
+              is skipped (controlled by vep.skip_if_annotated_exists).
+  Timeout: configurable via vep.timeout_hours (default 6 hours).
+
+  VEP base flags (always applied):
+    --cache --offline --assembly GRCh38 --dir_cache {cache}
+    --fasta {reference} --fork {n} --buffer_size 5000
+    --symbol --biotype --numbers --canonical --transcript_version
+    --hgvs --hgvsg
+    --af --af_gnomad --max_af
+    --sift b --polyphen b
+    --domains --uniprot
+    --no_stats --no_progress --force_overwrite
+
+  Optional plugins (added only when resource status == "found"):
+    CADD         --plugin CADD,{snv_file},{indel_file}
+    REVEL        --plugin REVEL,{file},grch38
+                   (grch38 parameter instructs the plugin to use column 3,
+                    the GRCh38 position, rather than column 2 which is hg19)
+    SpliceAI     --plugin SpliceAI,snv={snv_file},indel={indel_file}
+                   When only the SNV file is present:
+                   --plugin SpliceAI,snv={snv_file}  (SNV-only mode)
+    dbNSFP       --plugin dbNSFP,{file},{columns_from_settings}
+    AlphaMissense--plugin AlphaMissense,file={file}
+    ClinVar      --custom {clinvar_vcf},ClinVar,vcf,exact,0,CLNSIG,CLNREVSTAT,CLNDN
+
+  gnomAD AF is sourced from the VEP merged cache via --af_gnomad / --max_af.
+  A separate gnomAD VCF (hundreds of GB) is not required.
+
+analysis/parser.py
+  parse_vep_output(vcf_path) -> List[Variant]
+  Reads VEP CSQ field, extracts per-variant fields:
+    gene_symbol, consequence, hgvs_c, hgvs_p, hgvs_g
+    gnomad_af (MAX_AF primary, gnomAD_AF fallback)
+    sift_score, polyphen_score
+    revel_score, cadd_phred, spliceai_ds_max
+    clinvar_significance, clinvar_review_status, clinvar_disease
+  Produces one Variant object per record (split ALT already applied by norm).
+
+analysis/filter_engine.py
+  apply_filters(variants, settings, gene_list) -> List[Variant]
+  Filters (in order, configurable via settings.yaml):
+    1. PASS filter  (require_pass: true by default; "." is excluded)
+    2. AF cutoff    (max_af: 0.01 default; gnomAD MAX_AF used)
+    3. Consequence tier:
+         tier1 (stop_gained, frameshift, splice donor/acceptor, etc.)  -> keep
+         tier2 (missense, splice_region, inframe indel)                -> keep
+         tier3 (synonymous, UTR, intron)  -> keep only if in gene list
+                                             OR ClinVar P/LP
+         excluded (intergenic, upstream, downstream)                   -> drop
+    4. ClinVar benign exclusion (configurable via settings.yaml list)
+  Variants are never removed; variant.excluded and exclusion_reason are set.
+
+analysis/ranker.py
+  rank_variants(variants, settings) -> List[Variant]  (sorted)
+  Components (weights from settings.yaml, default values):
+
+    Component            Default weight   Signal source
+    -------------------- ---------------- -----------------------------------
+    ACMG classification  40               P=1.0, LP=0.8, VUS=0.4, LB=0.2, B=0
+    ClinVar status        20               P/LP=1.0, Conflicting=0.33, B/LB=0
+    Gene list match       20               in list=1.0, not in list=0.0
+    Rarity (gnomAD AF)   10               None/0=1.0, >= max_af=0.0 (linear)
+    Consequence severity 10               tier1=1.0, tier2=0.67, tier3=0.33
+    In-silico prediction  5               Mean of CADD/40, REVEL, SpliceAI
+
+  Formula:
+    priority_score = 100 x sum(weight_i x component_i) / total_weight
+  Excluded variants always rank below retained variants.
+  Ties broken deterministically by chrom -> pos -> ref -> alt.
+
+
+4d. ACMG/AMP CLASSIFICATION
+-----------------------------
+
+analysis/acmg/evidence_codes.py
+  EVIDENCE_CATALOGUE: maps each code to its strength and direction
+  classify(evidence_codes) -> ClassificationCategory
+  Implements the 2015 ACMG/AMP combining rules:
+    >= 1 PVS1 + >= 1 PS    -> Pathogenic
+    >= 2 PS                -> Pathogenic
+    >= 1 PVS1 + >= 2 PM    -> Pathogenic
+    (etc. per full rule table)
+
+analysis/acmg/rules.py
+  IMPLEMENTED_RULES: dict mapping code -> rule function
+  Each rule function: (variant, settings) -> bool
+  Implemented in v1.2:
+    PVS1  Null variant (stop_gained, frameshift, essential splice)
+           where LoF is established disease mechanism
+    PS1   Same amino acid change as known pathogenic (ClinVar lookup)
+    PS3   Well-established functional evidence (ClinVar review status proxy)
+    PM1   In mutational hotspot / critical functional domain (domain flag)
+    PM2   Absent / extremely rare in gnomAD (< 0.0001)
+    PM4   Protein length change (in-frame indel)
+    PM5   Novel missense at site where different missense is pathogenic
+    PP2   Missense in gene with low benign missense tolerance
+    PP3   Multiple in-silico tools predict damaging
+           (CADD >= 20 OR REVEL >= 0.75 OR SpliceAI >= 0.5)
+    BA1   AF > 5% in population databases
+    BS1   AF > disorder-expected threshold
+    BS2   Observed in healthy adults (gnomAD homozygous count proxy)
+    BP4   Multiple in-silico tools predict benign
+           (REVEL <= 0.15 AND SpliceAI <= 0.1)
+    BP7   Synonymous with no predicted splice impact
+
+analysis/acmg/classifier.py
+  classify_variant(variant, settings) -> (evidence_codes, classification)
+  classify_all(variants, settings) -> None  (modifies variants in-place)
+  Classification is applied to all variants, including excluded ones.
+  Rule exceptions are caught, logged as warnings, and do not abort the run.
+
+
+4e. REPORTING MODULES
+-----------------------
+
+reporting/pdf_report.py
+  write_pdf(variants, path, metadata, settings) -> str
+  Uses ReportLab. A4 landscape. Two main tables:
+    Summary table:   sample ID, case ID, date, variant counts, top ACMG class
+    Candidates table: Rank, Score, Gene, Chr:Pos Ref>Alt, HGVS c., HGVS p.,
+                       Consequence, ACMG class, Evidence codes, gnomAD AF, ClinVar
+  Column widths sum to 26.7 cm (fits A4 landscape with 1.5 cm margins).
+  Top N candidates controlled by reporting.max_candidates_in_report (default 20).
+  Disclaimer footer on each page.
+
+  VUS in Listed Genes section:
+    After the main candidates table, a second table is rendered for variants
+    that are: (a) classified as VUS, (b) in the user's gene list, and
+    (c) not already in the top candidates table. Includes an amber-shaded
+    explanatory note that classification is unchanged and ACMG criteria
+    apply strictly. This ensures gene-list VUS findings are surfaced for
+    review without inflating the ACMG classification.
+
+reporting/spreadsheet.py
+  write_spreadsheet(variants, path, metadata, settings) -> str
+  Uses openpyxl. One sheet with header row + one row per retained variant.
+  Columns: Rank, Score, Gene, Chrom, Pos, Ref, Alt, HGVS_c, HGVS_p,
+           Consequence, ACMG_Class, ACMG_Codes, gnomAD_AF, ClinVar_Sig,
+           ClinVar_Review, ClinVar_Disease, CADD_phred, REVEL, SpliceAI,
+           SIFT, PolyPhen, Excluded, Exclusion_Reason
+
+reporting/tsv_export.py
+  write_tsv(variants, path, metadata, settings) -> str
+  Same columns as spreadsheet, tab-separated, UTF-8.
+
+reporting/json_export.py
+  write_json(variants, path, metadata, settings) -> str
+  Structure:
+    { "metadata": {...}, "settings_snapshot": {...},
+      "variants": [ {all fields per variant}, ... ] }
+
+reporting/run_log.py
+  Structured JSON audit log written per run.
+  Records: step name, status, timestamp, detail, warnings, errors,
+           output file paths, run summary statistics.
+
+
+4f. GUI MODULES
+----------------
+
+gui/app.py
+  Main tkinter application window (class App, extends tk.Tk).
+  Font: DejaVu Sans 10pt / DejaVu Sans Mono 9pt (standard on Ubuntu 18.04+).
+  Layout: Analysis inputs form -> Run button / status -> scrollable log.
+  Input type detection: traces the input StringVar; disables R2 row for VCF.
+  Browse dialogs: per-field file type filters (VCF+FASTQ, FASTQ-only, .txt).
+  Context menus: right-click Cut/Copy/Paste/Select All on all Entry widgets;
+                 Copy/Select All on the log widget.
+  Non-blocking execution: threading.Thread (daemon) + queue.Queue +
+                          self.after(100, self._poll).
+
+gui/runner.py
+  start_pipeline_thread(cmd, queue)
+  Spawns a background Thread that runs subprocess.Popen on cmd.
+  Each stdout line is put on the queue as ("line", text).
+  Exit code as ("exit", code). Exceptions as ("error", str).
+
+gui/validation.py
+  validate_inputs(inputs) -> (bool, message)
+  Checks: input file exists, recognised extension (.vcf/.vcf.gz/.bcf/
+          .fastq/.fastq.gz/.fq/.fq.gz), R2 not set for VCF input,
+          R2 file exists if provided, gene list exists, sample_id non-empty,
+          output_dir non-empty.
+
+
+--------------------------------------------------------------------------------
+5.  FULL DATA FLOW
+--------------------------------------------------------------------------------
+
+FASTQ INPUT PATH
+----------------
+
+  R1.fastq.gz (+ R2.fastq.gz)
+          |
+          v
+  [bwa mem] piped to [samtools sort]
+  --> {sample}.sorted.bam
+          |
+          v
+  [samtools index]
+  --> {sample}.sorted.bam.bai
+          |
+          v
+  [docker run google/deepvariant]
+  --> {sample}.dv.vcf.gz
+          |
+          v
+  (joins VCF path below at VEP annotation)
+
+
+VCF INPUT PATH
+--------------
+
+  {input}.vcf[.gz]
+          |
+          v
+  [vcf_validator.py] -- validate format and headers
+          |
+          +---> Has CSQ header? --> YES --> skip to parser
+          |
+          v  NO
+  [vcf_normalizer.py]  -- split multi-allelic if present
+  --> {sample}.norm.vcf
+          |
+          v
+  [vep] with cache, plugins, custom ClinVar
+  --> {sample}.vep.vcf
+          |
+          v
+  [parser.py] -- parse CSQ INFO field
+  --> List[Variant]
+          |
+          v
+  [filter_engine.py] -- AF, PASS, consequence tiers, ClinVar benign
+  --> variants with .excluded / .exclusion_reason set
+          |
+          v
+  [acmg/classifier.py] -- evaluate 14 ACMG/AMP rules
+  --> variants with .acmg_evidence_codes / .acmg_classification set
+          |
+          v
+  [ranker.py] -- composite priority score 0-100
+  --> variants sorted by priority_score (desc)
+          |
+      +---+---+---+---+
+      v   v   v   v   v
+    pdf xlsx tsv json run_log
+
+
+--------------------------------------------------------------------------------
+6.  TOOL INTEGRATION DETAILS
+--------------------------------------------------------------------------------
+
+Tool            How located              How invoked
+--------------- ------------------------ ----------------------------------------
+bwa             shutil.which("bwa")      subprocess.Popen (piped to samtools)
+samtools        shutil.which("samtools") subprocess.Popen (stdin from bwa)
+                                         subprocess.run (index, sort)
+docker          paths_config or          subprocess.run
+                shutil.which("docker")   Full command includes --user uid:gid
+                                         and explicit volume mounts
+DeepVariant     Docker image at          Inside docker run; image is pulled
+                google/deepvariant:      automatically if not cached
+                {version}
+vep             paths_config.tools.vep   subprocess.run (with timeout)
+bcftools        paths_config or          subprocess.run
+                shutil.which             (norm -m -any for multi-allelic split)
+bgzip           paths_config or          setup validation only
+                shutil.which
+tabix           paths_config or          setup validation only
+                shutil.which
+ReportLab       Python library           reporting/pdf_report.py
+openpyxl        Python library           reporting/spreadsheet.py
+PyYAML          Python library           config reading/writing throughout
+
+ACMG/AMP criteria used and their in-silico sources:
+
+  Criterion   Strength     Trigger condition
+  ----------- ------------ ---------------------------------------------------
+  PVS1        Very strong  stop_gained, frameshift, essential splice donor/
+              pathogenic   acceptor; LoF is established disease mechanism
+  PS1         Strong P     Same amino acid change in ClinVar as Pathogenic
+  PS3         Strong P     ClinVar review status >= 2 stars (functional proxy)
+  PM1         Moderate P   Variant in annotated protein domain (VEP --domains)
+  PM2         Moderate P   gnomAD MAX_AF < 0.0001 or absent
+  PM4         Moderate P   In-frame indel causing protein length change
+  PM5         Moderate P   Novel missense at same codon as known pathogenic
+  PP2         Supporting P Missense in gene with low benign missense tolerance
+  PP3         Supporting P CADD >= 20  OR  REVEL >= 0.75  OR  SpliceAI >= 0.5
+  BA1         Stand-alone B gnomAD MAX_AF > 0.05
+  BS1         Strong B     gnomAD MAX_AF > disorder-expected
+  BS2         Strong B     Observed in gnomAD homozygous (healthy adult proxy)
+  BP4         Supporting B REVEL <= 0.15  AND  SpliceAI <= 0.1
+  BP7         Supporting B Synonymous with no predicted splice change
+
+
+--------------------------------------------------------------------------------
+7.  CONFIGURATION SYSTEM
+--------------------------------------------------------------------------------
+
+Two configuration files are used:
+
+config/paths.yaml
+  Written by setup/config_writer.py after each setup run.
+  The resources section is intended for manual editing by the user.
+  Structure:
+    setup_completed: true/false
+    setup_date: ISO datetime
+    pipeline_version: "1.0.0"
+    tools:
+      {name}:
+        path: /abs/path
+        version: "x.y"
+        status: found | missing | version_fail
+    resources:
+      {name}:
+        path: /abs/path  <-- user edits this
+        status: found | missing | not_provided | bad_format
+        notes: "one-line download hint"
+
+config/settings.yaml
+  Manually edited. Controls all analysis parameters.
+  Sections: pipeline, metadata, filtering, acmg, ranking, vep, deepvariant,
+            reporting.
+  No hardcoded thresholds exist in the analysis code — all thresholds are
+  read from this file.
+
+  Notable deepvariant settings:
+    version:       Docker image tag (default "1.6.1")
+    model_type:    WGS or WES
+    num_shards:    CPU threads inside the container
+    timeout_hours: Hard abort timeout (default 12)
+
+
+--------------------------------------------------------------------------------
+8.  TESTING STRATEGY
+--------------------------------------------------------------------------------
+
+Test framework: pytest
+Total tests: 927 (all passing at time of documentation)
+Coverage: all source modules have a corresponding test file.
+
+Test layout mirrors source:
+  tests/setup/       test_tool_checker.py, test_resource_checker.py
+  tests/analysis/    test_input_router.py, test_vcf_validator.py,
+                     test_vcf_normalizer.py, test_annotator.py,
+                     test_filter_engine.py, test_parser.py, test_ranker.py
+  tests/analysis/upstream/  test_fastq_handler.py
+  tests/analysis/acmg/      test_evidence_codes.py, test_rules.py,
+                              test_classifier.py
+  tests/reporting/   test_pdf_report.py, test_spreadsheet.py,
+                     test_tsv_export.py, test_json_export.py, test_run_log.py
+  tests/gui/         test_runner.py, test_validation.py
+
+Key testing principles:
+  - All subprocess calls are mocked — no real tools run during tests
+  - No real files are required; tmp_path fixtures provide isolated directories
+  - Integration-style tests exercise the full module API surface
+  - Error paths are tested as thoroughly as success paths
+  - GUI validation is a pure function and tested without a display
+
+Run the full suite:
+  python -m pytest --tb=short -q
+
+Run a single module:
+  python -m pytest tests/analysis/upstream/test_fastq_handler.py -v
+
+
+--------------------------------------------------------------------------------
+9.  KEY DESIGN DECISIONS
+--------------------------------------------------------------------------------
+
+1.  VCF-first architecture
+    The pipeline was designed around VCF as its internal data format. FASTQ
+    input converges to a VCF before any downstream processing begins. This
+    ensures a single code path for annotation, filtering, classification, and
+    reporting regardless of input type.
+
+2.  DeepVariant via Docker
+    DeepVariant requires complex dependencies (TensorFlow, htslib, etc.) that
+    are difficult to manage outside a container. The official Docker image
+    (google/deepvariant) provides a reproducible, self-contained environment.
+    Docker is checked during setup and its path stored in paths.yaml.
+    The --user uid:gid flag ensures output files are owned by the calling user.
+
+3.  VEP offline mode
+    VEP runs with --cache --offline. No web requests are made during analysis.
+    The VEP cache is validated at setup time. gnomAD AF is sourced from the
+    VEP merged cache (--af_gnomad --max_af), avoiding a multi-hundred-GB
+    separate gnomAD file download.
+
+4.  Optional resource plugin architecture
+    CADD, REVEL, SpliceAI, dbNSFP, AlphaMissense, and ClinVar are all optional.
+    Each is only loaded when its file(s) are in paths.yaml with status "found".
+    The pipeline logs clearly when a plugin is enabled or skipped.
+    This allows forensic labs to begin work immediately with only the required
+    resources and add optional resources incrementally.
+
+5.  ACMG/AMP v1 subset
+    Only the 14 criteria that can be evaluated from the available data sources
+    are implemented. The full 28-criterion set is documented and stubbed.
+    No criterion is invented or modified — each rule maps exactly to published
+    ACMG/AMP 2015 guidance.
+
+6.  Variants are never removed
+    filter_engine.py never removes a variant from the list. It sets
+    variant.excluded = True and records the reason. This ensures all variants
+    are available for reporting and audit, and allows the PDF to include
+    summary statistics on excluded counts.
+
+7.  Reproducible ranking
+    All weights and thresholds are in settings.yaml. Every component is
+    normalised to [0,1] before weighting. Ties are broken by genomic
+    coordinates deterministically. The same input with the same settings
+    always produces the same ranked output.
+
+8.  GUI is a thin shell
+    The desktop GUI (tkinter) does not contain any pipeline logic. It builds
+    a cli.py command from the form values and runs it via subprocess in a
+    background thread. The log panel shows the raw pipeline output. This means
+    the CLI and GUI are always functionally identical.
+
+
+--------------------------------------------------------------------------------
+10. OUTPUT FILE REFERENCE
+--------------------------------------------------------------------------------
+
+File pattern                        Generated when
+----------------------------------- -------------------------------------------
+{sample}.pdf                        Always (reporting step)
+{sample}.xlsx                       Always (reporting step)
+{sample}.variants.tsv               Always (reporting step)
+{sample}.json                       Always (reporting step)
+{sample}.run.log.json               Always (audit log)
+{sample}.vep.vcf                    VEP was run (unannotated VCF or FASTQ input)
+{sample}.norm.vcf                   Multi-allelic records were found and split
+{sample}.dv.vcf.gz                  FASTQ input (DeepVariant output)
+{sample}.sorted.bam                 FASTQ input (BWA alignment output)
+{sample}.sorted.bam.bai             FASTQ input (samtools index output)
+
+
+OUTPUT CONTENT SUMMARY:
+
+  PDF report
+    Page 1: summary table (sample ID, case ID, run date, variant counts)
+    Page 2+: ranked candidates table (top 20 by default)
+    Columns: Rank, Score, Gene, Chr:Pos Ref>Alt, HGVS c., HGVS p., Consequence,
+             ACMG class, Evidence codes, gnomAD AF, ClinVar significance
+    Optional: VUS in Listed Genes section (below main table when applicable)
+
+  Excel spreadsheet
+    One row per retained variant (excluded variants are present, marked)
+    All annotation fields, ACMG codes, scores, ClinVar fields
+    Suitable for sorting, filtering, and downstream statistical analysis
+
+  TSV
+    Same as spreadsheet; UTF-8; suitable for R / Python / database import
+
+  JSON
+    metadata block (sample_id, case_id, pipeline_version, run_date)
+    settings_snapshot (filtering thresholds, ACMG active criteria, weights)
+    variants array (full data per variant including all annotation fields)
+
+  Run log JSON
+    step-by-step execution record with timestamps
+    warnings and errors
+    output_files map (step name -> absolute path)
+    summary (total_variants, retained, excluded)
+
+
+--------------------------------------------------------------------------------
+11. KNOWN LIMITATIONS (v1.2)
+--------------------------------------------------------------------------------
+
+  - BAM/CRAM input is not supported. Convert to FASTQ or call variants
+    separately before using this pipeline.
+
+  - Single-sample only. Multi-sample VCFs (family trios, case/control) are
+    not supported.
+
+  - ACMG/AMP criteria are a v1 subset (14 of 28). Criteria requiring external
+    databases beyond what is available locally (e.g. gene-specific functional
+    data repositories) are not implemented.
+
+  - SpliceAI indel scores are not available from a public download without
+    an Illumina BaseSpace account. The pipeline runs in SNV-only mode when
+    only the SNV file is present. To add indel coverage, download from
+    Illumina BaseSpace (free account required) and set spliceai_indel_file
+    in config/paths.yaml.
+
+  - dbNSFP must be downloaded and prepared before the dbNSFP VEP plugin
+    is active. See scripts/download_dbnsfp.sh. Once downloaded, run
+    python cli.py --setup --force to register it in paths.yaml.
+
+  - Structural variants (SVs, CNVs) are not processed. Only SNVs and small
+    indels are handled.
+
+  - FASTQ input assumes Illumina short-read sequencing with Phred+33 quality
+    encoding. Long-read (PacBio, Oxford Nanopore) FASTQ is not supported in
+    the current DeepVariant model selection (WGS/WES).
+
+  - The priority score is for ordering candidates only. It is not a
+    clinical diagnosis, probability of pathogenicity, or validated score.
+    All candidates require expert review.
+
+  - Chromosome naming conventions (chr1 vs 1) must be consistent between
+    the input VCF/FASTQ, the reference FASTA, and the VEP cache.
+    Mismatches will result in 0 annotated variants.
+
+================================================================================
+  END OF PROJECT DOCUMENTATION
+================================================================================

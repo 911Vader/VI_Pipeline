@@ -1,0 +1,122 @@
+# =============================================================================
+# VI_Pipeline - Validated Tool and Resource Paths
+#
+# tools:     Auto-detected by setup. Do not edit this section directly.
+#
+# resources: Required resources are auto-detected.
+#            Optional resources (status: not_provided) must be configured
+#            manually — the 'notes' field shows what file is needed.
+#
+# To add an optional resource:
+#   1. Set its path:  resources.<name>.path: /your/path/to/file
+#   2. Re-run setup:  python cli.py --setup --force
+#      Setup will validate the path and update the status field.
+#
+# Generated: 2026-05-01T03:16:45.840559+00:00
+# =============================================================================
+
+setup_completed: true
+setup_timestamp: '2026-05-01T03:16:45.840559+00:00'
+setup_version: 1.0.0
+tools:
+  docker:
+    path: /usr/bin/docker
+    version: '28.2'
+    status: found
+  conda:
+    path: /path/to/your/home
+    version: '4.9'
+    status: found
+  python:
+    path: /path/to/your/home
+    version: '3.10'
+    status: found
+  nextflow:
+    path: /usr/local/bin/nextflow
+    version: '25.4'
+    status: found
+  vep:
+    path: /path/to/your/home
+    version: '113.0'
+    status: found
+  bcftools:
+    path: /usr/local/bin/bcftools
+    version: '1.22'
+    status: found
+  bgzip:
+    path: /usr/local/bin/bgzip
+    version: '1.22'
+    status: found
+  tabix:
+    path: /usr/local/bin/tabix
+    version: '1.22'
+    status: found
+resources:
+  reference_fasta:
+    path: /path/to/your/reference
+    status: found
+    notes: null
+  vep_cache_dir:
+    path: /path/to/your/home
+    status: found
+    notes: null
+  vep_plugins_dir:
+    path: /path/to/your/home
+    status: found
+    notes: null
+  clinvar_vcf:
+    path: /path/to/your/reference
+    status: found
+    notes: null
+  gnomad_vcf:
+    path: /path/to/your/reference
+    status: found
+    notes: 'gnomAD v4.1 genomes GRCh38 merged VCF. Downloaded 2026-05-13.'
+  cadd_snv_file:
+    path: /path/to/your/reference
+    status: found
+    notes: null
+  cadd_indel_file:
+    path: /path/to/your/reference
+    status: found
+    notes: null
+  revel_file:
+    path: /path/to/your/reference
+    status: found
+    notes: null
+  spliceai_snv_file:
+    path: /path/to/your/reference
+    status: found
+    notes: null
+  spliceai_indel_file:
+    path: /path/to/your/reference
+    status: found
+    notes: null
+  alphamissense_file:
+    path: /path/to/your/reference
+    status: found
+    notes: null
+  loftee_path:
+    path: /path/to/your/home
+    status: found
+    notes: null
+  loftee_human_ancestor_fa:
+    path: /path/to/your/reference
+    status: found
+    notes: null
+  loftee_conservation_file:
+    path: /path/to/your/reference
+    status: found
+    notes: null
+  loftee_gerp_bigwig:
+    path: /path/to/your/reference
+    status: found
+    notes: null
+  clingen_gene_validity_csv:
+    path: /path/to/your/reference
+    status: found
+    notes: null
+  bwa_index_prefix:
+    path: /path/to/your/reference
+    status: found
+    notes: null

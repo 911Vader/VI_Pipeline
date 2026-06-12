@@ -1,0 +1,746 @@
+================================================================================
+  VI_PIPELINE  |  Tools and Methods Reference
+  Version 1.2  |  Genomic Variant Analysis
+================================================================================
+
+This document explains every tool, algorithm, and method used or referenced in
+this pipeline — what it does, why it was chosen, and how it fits in the workflow.
+Each section also notes the main alternatives that exist in the field.
+
+
+================================================================================
+  PART 1 — SEQUENCING AND ALIGNMENT
+================================================================================
+
+--------------------------------------------------------------------------------
+1.1  BWA-MEM  (Burrows-Wheeler Aligner — Maximal Exact Match)
+--------------------------------------------------------------------------------
+
+What it does:
+  Aligns short DNA sequencing reads (FASTQ) to a reference genome (FASTA).
+  BWA-MEM is specifically designed for reads in the 70 bp–1 Mbp range and
+  is the standard aligner for Illumina whole-genome and whole-exome data.
+
+How it is used here:
+  bwa mem -t {threads} -R "@RG\tID:{id}\tSM:{id}\tPL:ILLUMINA\tLB:{id}"
+          {bwa_index} R1.fastq.gz [R2.fastq.gz]
+
+  The output is streamed via a Unix pipe directly into samtools sort, avoiding
+  writing an intermediate unsorted BAM to disk.
+
+Why BWA-MEM:
+  - Industry standard for Illumina short reads; used in GATK best-practice
+    workflows and Ensembl pipelines
+  - Handles paired-end reads, split reads, and chimeric alignments
+  - Read group tags (-R) are written so DeepVariant can identify the sample
+  - No additional licensing or container required
+
+Requires:
+  bwa index {reference.fa}    (one-time step, ~1 hour for GRCh38)
+  Output: .amb .ann .bwt .pac .sa files
+
+Alternatives in the field:
+  - HISAT2 / STAR     (RNA-seq only; not appropriate for DNA/WGS)
+  - Bowtie2           (slightly faster for short reads, lower accuracy on WGS)
+  - minimap2          (superior for long reads / Oxford Nanopore / PacBio;
+                       not appropriate for standard Illumina data)
+  - DRAGEN            (hardware-accelerated; requires Illumina DRAGEN platform)
+
+NOTE on minimap2:
+  minimap2 is not used in this pipeline because it is optimised for long-read
+  (Oxford Nanopore, PacBio) and splice-aware RNA alignment. For standard
+  Illumina short-read WGS/WES, BWA-MEM produces higher accuracy. minimap2
+  would be the correct choice if the pipeline is ever extended to support
+  long-read sequencing data.
+
+
+--------------------------------------------------------------------------------
+1.2  samtools  (Sequence Alignment/Map Tools)
+--------------------------------------------------------------------------------
+
+What it does:
+  A suite of utilities for working with SAM/BAM/CRAM alignment files.
+  The pipeline uses two subcommands:
+
+    samtools sort    Sorts aligned reads by genomic coordinate.
+                     Required before indexing and variant calling.
+    samtools index   Builds a BAI index (.bam.bai) for the sorted BAM.
+                     Required by DeepVariant to access reads by region.
+
+How it is used here:
+  1. samtools sort piped directly from bwa mem output:
+       bwa mem ... | samtools sort -@ {threads} -o {sample}.sorted.bam
+
+  2. samtools index to build the BAM index:
+       samtools index {sample}.sorted.bam
+
+Why samtools:
+  - The de facto standard for BAM manipulation; required by every downstream
+    variant caller
+  - Handles large files efficiently with multi-threading (-@)
+  - Paired with BWA in every major bioinformatics workflow
+
+Alternatives:
+  - sambamba    (faster sort for large files; drop-in replacement for sort/index)
+  - Picard      (Java-based; used in GATK workflows for markDuplicates etc.)
+
+
+================================================================================
+  PART 2 — VARIANT CALLING
+================================================================================
+
+--------------------------------------------------------------------------------
+2.1  DeepVariant  (Google's Deep Learning Variant Caller)
+================================================================================
+
+What it does:
+  Calls SNPs and indels from aligned sequencing reads (BAM). Uses a deep
+  convolutional neural network trained on Illumina WGS/WES data to classify
+  candidate variants as REF, HET, or HOM_ALT.
+
+  Output: a bgzipped VCF ({sample}.dv.vcf.gz) with genotype likelihoods.
+
+How it is used here:
+  Runs inside the official Docker image to handle complex dependencies
+  (TensorFlow, htslib). Volume mounts provide the BAM and reference.
+
+  docker run --rm --user {uid}:{gid}
+         -v {out_dir}:/workdir
+         -v {fasta_dir}:/ref:ro
+         google/deepvariant:1.6.1
+         /opt/deepvariant/bin/run_deepvariant
+         --model_type=WGS
+         --ref=/ref/{genome.fa}
+         --reads=/workdir/{sample}.sorted.bam
+         --output_vcf=/workdir/{sample}.dv.vcf.gz
+         --num_shards=4
+
+  model_type=WGS  for whole-genome sequencing
+  model_type=WES  for whole-exome sequencing
+  num_shards      CPU parallelism (controls runtime)
+
+  The --user uid:gid flag ensures output files are owned by the calling user,
+  not the Docker container's root user.
+
+Why DeepVariant:
+  - Consistently outperforms GATK HaplotypeCaller on precision/recall
+    benchmarks (PrecisionFDA Truth Challenge)
+  - Handles sequencing artifacts that fool classical callers
+  - Fully reproducible — same image, same model, same results
+  - No license cost; official Docker image freely available
+
+Why Docker for DeepVariant:
+  DeepVariant requires TensorFlow and specific htslib versions that conflict
+  with many system environments. The Docker image provides a stable,
+  self-contained runtime.
+
+Alternatives:
+  - GATK HaplotypeCaller   (most widely used; excellent documentation;
+                             germline calling standard in clinical labs)
+  - Strelka2               (fast; good for somatic calling)
+  - Clair3                 (designed for long-read sequencing)
+  - Octopus                (probabilistic model; strong for complex regions)
+  - bcftools mpileup+call  (fast; less accurate on indels; used in earlier
+                             versions of this pipeline — replaced by DeepVariant)
+
+NOTE on bcftools mpileup:
+  Earlier versions of this pipeline used:
+    bcftools mpileup -f {ref} {bam} | bcftools call -mv -o {vcf}
+  This was replaced by DeepVariant because DeepVariant is substantially more
+  accurate on indels and in low-complexity / repetitive regions, which are
+  particularly important in forensic analysis.
+
+
+================================================================================
+  PART 3 — VCF PROCESSING
+================================================================================
+
+--------------------------------------------------------------------------------
+3.1  bcftools
+--------------------------------------------------------------------------------
+
+What it does:
+  A toolkit for manipulating and analysing VCF/BCF files. The pipeline
+  uses two subcommands:
+
+    bcftools norm     Normalises multi-allelic records by splitting them into
+                      individual biallelic lines and left-aligning indels.
+    bcftools view     (Referenced in troubleshooting; splits by chromosome)
+
+How it is used here:
+  bcftools norm -m -any -f {GRCh38.fa} -o {output.vcf} {input.vcf}
+
+  -m -any    split ALL multi-allelic records into biallelic lines
+  -f         reference FASTA for left-alignment of indels
+
+  This step runs automatically before VEP annotation whenever multi-allelic
+  records are detected in the input VCF.
+
+Why bcftools norm before VEP:
+  VEP annotates one ALT allele per record. Multi-allelic records (A → T,G)
+  would result in only partial annotation. Splitting ensures every allele
+  receives its own annotation.
+
+Why bcftools for normalisation:
+  - Part of the htslib family (same as samtools); already a required tool
+  - Extremely fast; handles files of any size
+  - -m -any is the correct flag for full decomposition
+
+BCF format:
+  BCF (Binary Call Format) is the binary equivalent of VCF. It is more
+  compact and faster to read/write for large variant sets. bcftools handles
+  both VCF and BCF transparently. The pipeline accepts .bcf input files.
+
+Alternatives:
+  - vt decompose       (another normalisation tool; less common)
+  - GATK LeftAlignAndTrimVariants
+
+
+--------------------------------------------------------------------------------
+3.2  bgzip  (Block GZip)
+--------------------------------------------------------------------------------
+
+What it does:
+  Compresses VCF files using block-based gzip (BGZF format). Unlike standard
+  gzip, BGZF supports random access via a tabix index, which is required by
+  VEP, bcftools, and other tools when reading compressed VCF.
+
+How it is used here:
+  bgzip {file.vcf}  →  {file.vcf.gz}
+
+  Validated during setup (minimum version 1.17). The pipeline checks for
+  bgzip as a required tool. It is part of the htslib toolkit.
+
+Why bgzip not gzip:
+  A standard .gz file cannot be indexed with tabix. bgzip BGZF format is
+  the VCF standard for compressed input.
+
+
+--------------------------------------------------------------------------------
+3.3  tabix
+--------------------------------------------------------------------------------
+
+What it does:
+  Creates an index (.tbi) for bgzipped VCF files (and BED, GFF, etc.).
+  The index enables random access to specific genomic regions without
+  reading the entire file — essential for efficient annotation.
+
+How it is used here:
+  tabix -p vcf {file.vcf.gz}  →  {file.vcf.gz.tbi}
+
+  Required for all .vcf.gz input files. The pipeline validates that a .tbi
+  index exists alongside any compressed VCF at the start of every run.
+
+Why tabix:
+  VEP, bcftools, and all standard bioinformatics tools require a tabix index
+  for .vcf.gz files. Without it, most tools produce cryptic "cannot seek" errors.
+
+
+================================================================================
+  PART 4 — VARIANT ANNOTATION
+================================================================================
+
+--------------------------------------------------------------------------------
+4.1  VEP  (Variant Effect Predictor, Ensembl)
+--------------------------------------------------------------------------------
+
+What it does:
+  The primary annotation engine. Given a VCF, VEP adds consequence prediction,
+  HGVS notation, population frequencies, and in-silico scores to each variant.
+  Results are written as a structured CSQ INFO field in the output VCF.
+
+How it is used here:
+  vep --input_file {in.vcf} --output_file {out.vcf} --vcf
+      --cache --offline --assembly GRCh38
+      --dir_cache {vep_cache_dir} --fasta {GRCh38.fa}
+      --fork 4 --buffer_size 5000
+      --symbol --hgvs --hgvsg --canonical --transcript_version
+      --biotype --numbers
+      --af --af_gnomad --max_af
+      --sift b --polyphen b
+      --domains --uniprot
+      --no_stats --no_progress --force_overwrite
+      [--dir_plugins {plugins_dir}]
+      [--plugin CADD,...]
+      [--plugin REVEL,...]
+      [--plugin SpliceAI,...]
+      [--plugin dbNSFP,...]
+      [--plugin AlphaMissense,...]
+      [--custom {clinvar_vcf},ClinVar,vcf,exact,0,CLNSIG,CLNREVSTAT,CLNDN]
+
+  --cache --offline    No internet access during analysis; uses local cache
+  --af_gnomad --max_af gnomAD allele frequencies from cache; no separate file
+  --sift b --polyphen b  SIFT + PolyPhen scores with labels; built into VEP
+  --canonical          Flags canonical transcripts (used for primary selection)
+  --hgvs --hgvsg       HGVS c., p., and g. notation for reporting
+
+Why VEP:
+  - The Ensembl reference standard for consequence prediction
+  - Fully offline; no external data requests during analysis
+  - Plugin architecture allows any score file to be added without code changes
+  - gnomAD AF is served from the pre-built cache, avoiding a multi-TB download
+  - Produces a standard CSQ INFO field parseable by all downstream tools
+
+Alternatives:
+  - ANNOVAR      (widely used; more complex setup; uses text flat files)
+  - SnpEff       (fast; good for coding variants; weaker for splice prediction)
+  - Nirvana      (Microsoft; C#; fast; clinical-grade)
+  - Illumina VCF Annotation   (commercial)
+
+
+--------------------------------------------------------------------------------
+4.2  CADD  (Combined Annotation Dependent Depletion)
+================================================================================
+
+What it does:
+  CADD scores the deleteriousness of single-nucleotide variants and indels.
+  The CADD phred score integrates 60+ annotations into a single score.
+  Phred ≥ 20 means the variant is in the top 1% most deleterious substitutions
+  in the human genome; Phred ≥ 30 = top 0.1%.
+
+How it is used here:
+  VEP plugin:  --plugin CADD,{cadd_snv_file},{cadd_indel_file}
+  Requires both a SNV score file and an indel score file.
+  CADD phred score is extracted from the CSQ field by the parser.
+
+Role in ACMG:
+  CADD phred >= 20 contributes to PP3 (multiple in-silico tools predict damaging)
+  CADD phred < 20 alone is not sufficient for BP4 (benign prediction)
+
+Files needed:
+  whole_genome_SNVs.tsv.gz  (SNV scores — ~80 GB compressed)
+  gnomad.genomes.r4.0.indel.tsv.gz  (indel scores)
+  Both must be tabix-indexed.
+  Status: CONFIGURED  (path: /mnt/server_share/sara/)
+
+Why CADD:
+  - One of the most widely used deleteriousness scores in clinical genomics
+  - Covers all possible single-nucleotide substitutions in GRCh38
+  - Explicit recommendation in many ACMG/AMP variant classification guidelines
+
+
+--------------------------------------------------------------------------------
+4.3  REVEL  (Rare Exome Variant Ensemble Learner)
+--------------------------------------------------------------------------------
+
+What it does:
+  An ensemble score for predicting the pathogenicity of missense variants.
+  REVEL integrates 13 individual tools (including MutPred, FATHMM-MKL, VEST,
+  PolyPhen-2, SIFT) into a single score between 0 and 1.
+
+How it is used here:
+  VEP plugin:  --plugin REVEL,{revel_all_chromosomes.tsv.gz},grch38
+  The grch38 parameter tells the plugin to use column 3 (GRCh38 position)
+  rather than column 2 (hg19 position, the file default). This is required
+  because REVEL stores both coordinates and the hg19 column is used by default.
+  REVEL score is extracted from the CSQ field.
+
+Role in ACMG:
+  REVEL >= 0.75  →  supports PP3 (pathogenic in-silico evidence)
+  REVEL <= 0.15  →  supports BP4 (benign in-silico evidence)
+
+Files needed:
+  revel_all_chromosomes.tsv.gz  (tabix indexed)
+  Status: CONFIGURED  (path: /mnt/server_share/Reference_Material/annotation/)
+
+File preparation notes:
+  The REVEL download is a CSV (comma-separated) ZIP archive. It must be:
+    1. Unzipped, header line prefixed with '#'
+    2. Rows with empty GRCh38 position (col 3) filtered out
+    3. Converted from CSV to TSV
+    4. Sorted by chromosome (col 1) then GRCh38 position (col 3)
+    5. bgzipped and tabix indexed with: tabix -f -s 1 -b 3 -e 3
+  The download script (scripts/download_annotation_resources.sh) handles all
+  of these steps automatically.
+
+Why REVEL:
+  - Specifically designed for rare missense variant classification
+  - High performance on ClinVar validation sets
+  - Explicitly recommended in ACMG/AMP variant classification guidelines
+
+
+--------------------------------------------------------------------------------
+4.4  SpliceAI
+--------------------------------------------------------------------------------
+
+What it does:
+  A deep-learning tool that predicts the impact of a variant on RNA splicing.
+  SpliceAI outputs four delta scores:
+    DS_AG  Acceptor gain
+    DS_AL  Acceptor loss
+    DS_DG  Donor gain
+    DS_DL  Donor loss
+  The maximum of these four is used as the overall splice impact score.
+
+How it is used here:
+  VEP plugin (SNV + indel):  --plugin SpliceAI,snv={snv_file},indel={indel_file}
+  VEP plugin (SNV-only):     --plugin SpliceAI,snv={snv_file}
+  SNV-only mode is used automatically when only the SNV file is present.
+  The parser extracts the maximum of all four delta scores.
+
+Role in ACMG:
+  SpliceAI max_ds >= 0.5  →  supports PP3 (high splice impact, pathogenic)
+  SpliceAI max_ds <= 0.1  →  supports BP4 (no splice impact, benign)
+
+Files needed:
+  SNV file:   spliceai_scores.raw.snv.ensembl_mane_v1.4.grch38.vcf.gz
+              Source: Ensembl FTP (publicly available, ~28 GB)
+              Status: CONFIGURED
+                (path: /mnt/server_share/Reference_Material/annotation/)
+  Indel file: spliceai_scores.raw.indel.hg38.vcf.gz
+              Source: Illumina BaseSpace (free account required, ~2 GB)
+              Status: NOT PROVIDED
+              To obtain:
+                1. Create a free account at basespace.illumina.com
+                2. Accept the SpliceAI dataset share
+                3. Download with the BaseSpace CLI
+                4. tabix-index the file
+                5. Run: python cli.py --setup --force
+  Both require tabix index (.tbi).
+
+Source note:
+  The SNV file is hosted on Ensembl FTP (MANE v1.4 build) and downloads
+  automatically via the download script. The indel file is distributed only
+  through Illumina BaseSpace and requires a free account. The pipeline runs
+  in SNV-only splice mode until the indel file is provided — this covers
+  the vast majority of clinically significant splice variants.
+
+Why SpliceAI:
+  - Strongest published splice prediction tool for clinical variant assessment
+  - Covers both canonical and cryptic splice sites
+  - Routinely used in diagnostic laboratories
+
+
+--------------------------------------------------------------------------------
+4.5  dbNSFP  (Database of Non-Synonymous Function Predictions)
+--------------------------------------------------------------------------------
+
+What it does:
+  A pre-computed database integrating predictions and scores from dozens of
+  functional prediction algorithms for missense variants. This pipeline
+  extracts the following columns by default (configurable in settings.yaml):
+
+    REVEL_score, CADD_phred, Polyphen2_HDIV_score, Polyphen2_HDIV_pred,
+    SIFT_score, SIFT_pred, MutationTaster_pred, MetaRNN_score
+
+How it is used here:
+  VEP plugin:  --plugin dbNSFP,{dbnsfp.gz},{column1},{column2},...
+  Columns are configured in settings.yaml under vep.dbnsfp_columns.
+
+Why dbNSFP:
+  - A single file provides access to 30+ prediction tools simultaneously
+  - Avoids running each tool individually
+  - Well-maintained; updated for each GRCh38 release
+
+Files needed:
+  dbNSFP4.1a_grch38.gz  (tabix indexed)
+  Status: DOWNLOADING  (see scripts/download_dbnsfp.sh)
+  The download script fetches 24 per-chromosome files from Zenodo record
+  4323592, merges them with a single header, and produces a sorted,
+  bgzipped, tabix-indexed file. After download, run:
+    python cli.py --setup --force
+
+
+--------------------------------------------------------------------------------
+4.6  AlphaMissense  (DeepMind / Google)
+--------------------------------------------------------------------------------
+
+What it does:
+  A deep-learning model from DeepMind that classifies every possible single
+  amino acid substitution in the human proteome as likely benign, ambiguous,
+  or likely pathogenic. Based on the AlphaFold protein structure model.
+  Returns am_pathogenicity score (0–1) and am_class.
+
+How it is used here:
+  VEP plugin:  --plugin AlphaMissense,file={alphamissense_file}
+  The am_pathogenicity score is extracted by the parser.
+
+Why AlphaMissense:
+  - Novel structural-context approach that captures information orthogonal to
+    sequence-based tools (REVEL, CADD)
+  - Covers all possible missense variants; pre-computed lookup is fast
+  - Published in Science (2023) with high clinical benchmark performance
+
+Files needed:
+  AlphaMissense_hg38.tsv.gz  (tabix indexed)
+  Status: CONFIGURED  (path: /mnt/server_share/Reference_Material/annotation/)
+
+
+--------------------------------------------------------------------------------
+4.7  ClinVar  (NCBI)
+--------------------------------------------------------------------------------
+
+What it does:
+  NCBI's database of clinically interpreted variants. Each variant has a
+  clinical significance (Pathogenic, Likely Pathogenic, Uncertain Significance,
+  Likely Benign, Benign) and a review status (number of expert stars).
+
+How it is used here:
+  VEP --custom flag:
+    --custom {clinvar.vcf.gz},ClinVar,vcf,exact,0,CLNSIG,CLNREVSTAT,CLNDN
+
+  This adds three INFO fields to the output VCF:
+    ClinVar_CLNSIG      clinical significance string
+    ClinVar_CLNREVSTAT  review status (e.g. "criteria_provided,_single_submitter")
+    ClinVar_CLNDN       disease name(s)
+
+Role in filtering and ACMG:
+  - Variants classified as Benign or Likely Benign in ClinVar are excluded
+    by the filter engine (configurable via settings.yaml)
+  - ClinVar Pathogenic/Likely Pathogenic with ≥2 review stars triggers PS3
+  - ClinVar P/LP classification contributes to priority scoring
+
+Files needed:
+  clinvar.vcf.gz  (from https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/)
+  clinvar.vcf.gz.tbi  (tabix index)
+  Status: CONFIGURED  (path: /mnt/server_share/Reference_Material/annotation/)
+
+
+--------------------------------------------------------------------------------
+4.8  SIFT and PolyPhen-2  (built into VEP)
+--------------------------------------------------------------------------------
+
+SIFT (Sorting Intolerant From Tolerant):
+  Predicts whether an amino acid substitution affects protein function based
+  on sequence homology and the physical properties of amino acids.
+  Score: 0 (deleterious) to 1 (tolerated).
+  Activated in VEP with --sift b  (returns score + label)
+
+PolyPhen-2 (Polymorphism Phenotyping v2):
+  Predicts the possible impact of amino acid substitution using sequence-,
+  phylogenetic-, and structure-based features.
+  Score: 0 (benign) to 1 (probably damaging).
+  Activated in VEP with --polyphen b  (returns score + label)
+
+Why both are used:
+  SIFT and PolyPhen-2 are built into VEP at no extra cost (no plugin file
+  needed). Their scores are captured in the CSQ field and made available
+  to the ACMG classifier and output reports.
+
+Role in ACMG:
+  Used alongside CADD, REVEL, and SpliceAI for PP3/BP4 evaluation.
+
+
+================================================================================
+  PART 5 — ACMG/AMP CLASSIFICATION
+================================================================================
+
+--------------------------------------------------------------------------------
+5.1  ACMG/AMP 2015 Classification Framework
+--------------------------------------------------------------------------------
+
+What it is:
+  The American College of Medical Genetics and Genomics / Association for
+  Molecular Pathology published guidelines in 2015 for interpreting the
+  clinical significance of sequence variants. The framework defines:
+
+  Evidence categories:
+    PVS  Pathogenic Very Strong
+    PS   Pathogenic Strong
+    PM   Pathogenic Moderate
+    PP   Pathogenic Supporting
+    BA   Benign Stand-Alone
+    BS   Benign Strong
+    BP   Benign Supporting
+
+  Five classification categories:
+    Pathogenic (P)
+    Likely Pathogenic (LP)
+    Variant of Uncertain Significance (VUS)
+    Likely Benign (LB)
+    Benign (B)
+
+Criteria implemented in v1.2:
+  Code  Strength       Rule
+  ----- -------------- -------------------------------------------------------
+  PVS1  Very strong P  Null variant in gene where LoF causes disease
+                        (stop_gained, frameshift, canonical splice ±1/2,
+                         start_lost)
+  PS3   Strong P       Well-established functional evidence — proxied by
+                        ClinVar P/LP with ≥2-star review status
+  PM2   Moderate P     Absent or extremely rare in population databases
+                        (gnomAD MAX_AF < 0.0001)
+  PM4   Moderate P     Protein-length change (in-frame indel or stop-loss)
+  PP3   Supporting P   Multiple in-silico tools predict damaging
+                        (CADD ≥ 20 OR REVEL ≥ 0.75 OR SpliceAI ≥ 0.5)
+  BA1   Stand-alone B  Very high population frequency (gnomAD AF > 5%)
+  BS1   Strong B       Allele frequency greater than expected for disorder
+  BP4   Supporting B   Multiple in-silico tools predict benign
+                        (REVEL ≤ 0.15 AND SpliceAI ≤ 0.1)
+  BP7   Supporting B   Synonymous variant with no predicted splice impact
+
+
+================================================================================
+  PART 6 — REPORTING AND OUTPUT
+================================================================================
+
+--------------------------------------------------------------------------------
+6.1  ReportLab  (PDF generation)
+--------------------------------------------------------------------------------
+
+What it does:
+  Python library for generating PDF documents programmatically.
+  Used to produce the A4 landscape PDF report with formatted tables.
+
+How it is used here:
+  reporting/pdf_report.py constructs two tables using ReportLab's Platypus:
+  - A summary table (sample metadata, run statistics)
+  - A candidates table (top N variants by priority score)
+
+Why ReportLab:
+  - Pure Python; no system dependencies
+  - Precise column width control needed to fit the wide candidates table
+    on A4 landscape within margins
+
+
+--------------------------------------------------------------------------------
+6.2  openpyxl  (Excel spreadsheet generation)
+--------------------------------------------------------------------------------
+
+What it does:
+  Python library for reading and writing Excel .xlsx files.
+  Used to produce the Excel spreadsheet output with all retained variants.
+
+How it is used here:
+  reporting/spreadsheet.py writes one row per variant with all annotation
+  fields, ACMG codes, scores, and filtering status.
+
+Why openpyxl:
+  - The standard Python library for .xlsx output
+  - No Microsoft Office dependency; .xlsx is readable everywhere
+
+
+--------------------------------------------------------------------------------
+6.3  PyYAML  (YAML configuration)
+--------------------------------------------------------------------------------
+
+What it does:
+  Python library for reading and writing YAML files.
+  Used throughout the pipeline for configuration files.
+
+How it is used here:
+  - Reading config/settings.yaml (analysis parameters)
+  - Reading and writing config/paths.yaml (tool/resource paths)
+  - Reading optional --metadata YAML files
+
+
+================================================================================
+  PART 7 — TOOLS NOT USED IN THIS PIPELINE (AND WHY)
+================================================================================
+
+Tool            Category        Why not used
+--------------- --------------- ------------------------------------------------
+minimap2        Aligner         Designed for long-read (ONT, PacBio) and
+                                 splice-aware RNA alignment. For standard
+                                 Illumina short-read WGS/WES, BWA-MEM gives
+                                 better accuracy.
+
+GATK            Variant caller  An excellent tool; replaced here by DeepVariant
+HaplotypeCaller                  which has higher accuracy on benchmarks for
+                                 both SNVs and indels.
+
+STAR            Aligner         RNA-seq aligner; not relevant for DNA variant
+HISAT2                           calling from WGS/WES data.
+
+Picard          BAM tools       Java-based; overlaps with samtools. Would be
+                                 needed if PCR duplicate marking is added in a
+                                 future version.
+
+BaseRecalibrator BQSR            GATK base quality score recalibration; not
+                                 needed with DeepVariant (handles quality
+                                 internally via its neural network model).
+
+pysam           Python VCF      Listed in requirements.txt originally but never
+                                 used. All VCF parsing is done with Python's
+                                 built-in file I/O + gzip. Removed in v1.2.
+
+structlog       Logging         Listed in requirements.txt originally but never
+                                 used. Python's standard logging module is used
+                                 throughout. Removed in v1.2.
+
+nf-core/sarek   Pipeline        A comprehensive Nextflow pipeline for somatic
+                                 and germline variant calling. The bam_handler.py
+                                 scaffold was originally intended to call sarek
+                                 for BAM input; this feature is deferred.
+
+Nextflow        Workflow mgr    Checked during setup but not used in v1.2.
+                                 Included for future parallel execution.
+
+ClinVar API     Annotation      The ClinVar VCF file is used locally via VEP
+                                 --custom. No API calls are made during analysis.
+
+Alamut          Annotation      Commercial; not open-source.
+
+Franklin/       Clinical        Web-based; not suitable for offline/forensic
+Varsome         platforms        analysis.
+
+
+================================================================================
+  PART 8 — TOOL VERSION REQUIREMENTS SUMMARY
+================================================================================
+
+Tool            Min version    Where checked
+--------------- -------------- -----------------------------------------------
+Docker          20.0           setup/tool_checker.py  MIN_VERSIONS["docker"]
+VEP             111            setup/tool_checker.py  MIN_VERSIONS["vep"]
+bcftools        1.17           setup/tool_checker.py  MIN_VERSIONS["bcftools"]
+bgzip           1.17           setup/tool_checker.py  MIN_VERSIONS["bgzip"]
+tabix           1.17           setup/tool_checker.py  MIN_VERSIONS["tabix"]
+Python          3.10           setup/tool_checker.py  MIN_VERSIONS["python"]
+bwa             any            analysis/upstream/fastq_handler.py  shutil.which
+samtools        any            analysis/upstream/fastq_handler.py  shutil.which
+DeepVariant     1.6.1 (default) config/settings.yaml deepvariant.version
+
+Python libraries:
+  PyYAML        6.0+           requirements.txt
+  openpyxl      3.1.0+         requirements.txt
+  reportlab     4.0.0+         requirements.txt
+  pytest        8.0.0+         requirements.txt (testing only)
+  pytest-cov    5.0.0+         requirements.txt (testing only)
+
+
+================================================================================
+  PART 9 — COMPLETE TOOL-TO-MODULE MAP
+================================================================================
+
+Tool / Library     Used in module(s)
+------------------ -------------------------------------------------------
+bwa                analysis/upstream/fastq_handler.py  _run_bwa_align()
+samtools           analysis/upstream/fastq_handler.py  _run_bwa_align()
+                                                        _run_samtools_index()
+docker             analysis/upstream/fastq_handler.py  _run_deepvariant()
+DeepVariant        analysis/upstream/fastq_handler.py  _run_deepvariant()
+bcftools           analysis/vcf_normalizer.py           normalize_vcf()
+bgzip              setup/tool_checker.py  (validated; future use)
+tabix              setup/tool_checker.py  (validated; future use)
+                   analysis/vcf_validator.py            _check_tabix_index()
+vep                analysis/annotator.py                run_vep()
+CADD plugin        analysis/annotator.py                _build_plugin_args()
+REVEL plugin       analysis/annotator.py                _build_plugin_args()
+SpliceAI plugin    analysis/annotator.py                _build_plugin_args()
+dbNSFP plugin      analysis/annotator.py                _build_plugin_args()
+AlphaMissense      analysis/annotator.py                _build_plugin_args()
+ClinVar (custom)   analysis/annotator.py                _build_custom_args()
+SIFT               analysis/annotator.py  (--sift b flag; VEP built-in)
+PolyPhen-2         analysis/annotator.py  (--polyphen b flag; VEP built-in)
+Python gzip        analysis/parser.py, vcf_validator.py, annotator.py
+Python subprocess  analysis/upstream/fastq_handler.py
+                   analysis/vcf_normalizer.py
+                   analysis/annotator.py
+Python shutil      analysis/upstream/fastq_handler.py  shutil.which()
+                   analysis/vcf_normalizer.py
+PyYAML             cli.py, setup/config_writer.py
+openpyxl           reporting/spreadsheet.py
+reportlab          reporting/pdf_report.py
+tkinter            gui/app.py  (standard library; no install needed)
+Python dataclasses analysis/parser.py  (Variant, TranscriptAnnotation)
+Python logging     all modules  (standard library)
+Python argparse    cli.py       (standard library)
+Python pathlib     throughout   (standard library)
+Python json        reporting/json_export.py, reporting/run_log.py
+Python threading   gui/runner.py  (background pipeline execution)
+Python queue       gui/runner.py, gui/app.py  (thread-safe output streaming)
+
+================================================================================
+  END OF TOOLS AND METHODS REFERENCE
+================================================================================

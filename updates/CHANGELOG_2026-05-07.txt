@@ -1,0 +1,163 @@
+VI_Pipeline — Change Log
+Date: 2026-05-07
+================================================================================
+
+SUMMARY
+-------
+4 changes: DeepVariant HTML report made optional (default off), full BAM/CRAM
+input support added (previously stubbed), BAM Docker volume mount bug fixed
+(BAM outside the output directory was invisible inside the container), and a
+synthetic test-file suite created covering all three input types.
+
+================================================================================
+
+19. DEEPVARIANT VISUAL REPORT OPTIONAL (DEFAULT OFF)
+Files: config/settings.yaml, analysis/upstream/fastq_handler.py
+
+Problem:
+  DeepVariant always generated a .dv.visual_report.html file alongside the
+  output VCF. The file is a Vega-Lite QC report (variant types, depth, QUAL,
+  GQ, VAF, mutation spectrum, indel size). It is useful for manual QC but
+  serves no downstream purpose in the pipeline and adds unnecessary output
+  to every run.
+
+Changes:
+  config/settings.yaml:
+  - Added visual_report: false under the deepvariant: section.
+    Set to true to re-enable the HTML report.
+
+  analysis/upstream/fastq_handler.py:
+  - Added visual_report: bool = False parameter to _run_deepvariant().
+  - When visual_report is False (default), appends --novcf_stats_report to
+    the Docker command, suppressing HTML generation.
+  - Call site in run_fastq_to_vcf() reads dv_cfg.get("visual_report", False)
+    and passes it through.
+  - Call site in bam_handler.run_bam_to_vcf() reads the same setting.
+
+--------------------------------------------------------------------------------
+
+20. BAM/CRAM INPUT SUPPORT
+Files: analysis/upstream/bam_handler.py, cli.py, gui/app.py,
+       gui/validation.py, analysis/input_router.py,
+       tests/gui/test_validation.py
+
+Problem:
+  BAM/CRAM input was always a stub — bam_handler.py raised NotImplementedError
+  and cli.py raised NotImplementedError for the BAM_CRAM input type. The
+  extension was detected correctly but the pipeline immediately exited.
+
+Changes:
+  analysis/upstream/bam_handler.py:
+  - Full implementation of run_bam_to_vcf().
+  - Resolves samtools, docker, and reference FASTA paths using the same
+    helpers as fastq_handler (_require_tool, _get_docker, _get_reference_fasta).
+  - Checks for a .bai index adjacent to the BAM; creates one with
+    samtools index if absent.
+  - Calls _run_deepvariant() directly (shared with fastq_handler).
+  - Reads all DeepVariant settings from config/settings.yaml (num_shards,
+    version, model_type, timeout_hours, visual_report).
+
+  cli.py:
+  - Replaced NotImplementedError BAM branch with the real execution path:
+      detect BAM → run_bam_to_vcf() → check for multi-allelic records →
+      normalize if needed → VEP → parse → filter → ACMG → rank → reports.
+  - Stage count: 2 + _TAIL (DV + VEP + 5 tail stages = 7 total), expands
+    to 3 + _TAIL if normalisation is needed after DeepVariant.
+  - Updated --input help text to mention BAM.
+  - Updated unknown-extension error message to list .bam / .cram.
+
+  gui/app.py:
+  - Added _BAM_EXTS = (".bam", ".cram") constant.
+  - _on_input_changed() now enables the R2 row only for FASTQ; BAM and VCF
+    both disable and clear R2 (BAM is already aligned, no R2 needed).
+  - Input field hint updated to include "or BAM (.bam)".
+  - File picker _BROWSE_TYPES["input"] now lists BAM/CRAM files and includes
+    a dedicated "BAM / CRAM files" filter group.
+
+  gui/validation.py:
+  - Added _BAM_EXTS and _is_bam() helper.
+  - validate_inputs() now accepts .bam and .cram as valid input types.
+  - Error message updated to mention BAM/CRAM.
+
+  analysis/input_router.py:
+  - Updated module docstring to reflect BAM/CRAM is now supported.
+
+  tests/gui/test_validation.py:
+  - test_unrecognised_extension_is_rejected: changed fixture from input.bam
+    to input.txt (.bam is now a valid extension, so the old fixture passed
+    validation and the assertion failed).
+
+--------------------------------------------------------------------------------
+
+21. BAM DOCKER VOLUME MOUNT FIX
+File: analysis/upstream/fastq_handler.py
+
+Problem:
+  _run_deepvariant() always mapped the container's /workdir to out_dir and
+  set bam_in_container = /workdir/{bam_name}. This assumed the BAM resided
+  inside out_dir, which is true for the FASTQ path (the sorted BAM is written
+  there by BWA) but false for the BAM path, where the user's BAM is at an
+  arbitrary host location. DeepVariant exited with code 1 immediately because
+  the BAM path inside the container did not exist.
+
+  Observed in the first real BAM run:
+    --reads=/workdir/PT1_filtered.bam  (file not present — BAM was in
+    /home/admin7995/VI_Pipeline/, not in runs/pt1bam/)
+
+Fix:
+  Added a BAM directory check alongside the existing FASTA directory check.
+  Three cases are now handled:
+
+    BAM dir == out_dir     → /workdir/{bam.name}      (no new mount)
+    BAM dir == fasta_dir   → /ref/{bam.name}           (reuses /ref mount)
+    BAM dir is elsewhere   → add -v {bam_dir}:/bam:ro
+                             → /bam/{bam.name}
+
+  The .bai index is in the same directory as the BAM, so it is always
+  accessible via whichever mount covers the BAM directory.
+
+  Corrected Docker command for PT1_filtered.bam:
+    -v /home/admin7995/VI_Pipeline/runs/pt1bam:/workdir
+    -v /mnt/.../WholeGenomeFasta:/ref:ro
+    -v /home/admin7995/VI_Pipeline:/bam:ro   ← added
+    --reads=/bam/PT1_filtered.bam            ← was /workdir/PT1_filtered.bam
+
+--------------------------------------------------------------------------------
+
+22. SYNTHETIC TEST FILE SUITE
+Files: test_data/test_sample.vcf, test_data/wgs_test.vcf,
+       test_data/test_r1.fastq.gz, test_data/test_r2.fastq.gz,
+       test_data/test.bam, test_data/test.bam.bai
+
+Created a set of synthetic test files covering all three pipeline input types.
+
+  test_data/test_sample.vcf  (small VCF — 10 variants)
+    - GRCh38, unannotated, proper FORMAT fields (GT:DP:GQ:AD)
+    - Variants in BRCA1, BRCA2, TP53, CFTR, LDLR, MUTYH
+    - Mix of SNVs and one frameshift indel; het and hom genotypes
+
+  test_data/wgs_test.vcf  (WGS-scale VCF — 56,308 variants, 3.5 MB)
+    - Variants distributed across chr1–22 and chrX
+    - 85% SNVs, 15% indels; Ti/Tv = 2.02 (expected for WGS: ~2.0–2.1)
+    - ~30x depth (lognormal), 60% het / 40% hom alt
+    - 85% PASS, 10% LowQual, 5% LowDP
+    - 8 known disease-gene variants embedded in the background noise
+
+  test_data/test_r1.fastq.gz  /  test_r2.fastq.gz  (paired-end FASTQ)
+    - 2,000 read pairs, 150 bp, Phred+33 quality
+    - Random synthetic sequence; valid gzip format
+
+  test_data/test.bam  +  test.bam.bai  (BAM)
+    - 3,000 reads; coordinate-sorted, indexed
+    - Reads distributed across chr1, chr7, chr13, chr17, chr19
+      (regions covering MUTYH, CFTR, BRCA2, BRCA1/TP53, LDLR)
+    - Full GRCh38 sequence dictionary in header; MAPQ 20–60; NM tags
+
+================================================================================
+
+TEST SUMMARY
+------------
+  Updated: test_unrecognised_extension_is_rejected (input.bam → input.txt)
+  Total: 983 tests — all passing (no new tests added)
+
+================================================================================

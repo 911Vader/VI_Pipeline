@@ -1,0 +1,290 @@
+VI_Pipeline — Change Log
+Date: 2026-05-05
+================================================================================
+
+SUMMARY
+-------
+9 changes/fixes applied today across annotation, classification, filtering,
+QC, reporting, and GUI modules. Test count increased from 931 to 983 (all pass).
+
+================================================================================
+
+1. BWA ALIGNMENT TIMEOUT FIX
+Files: analysis/upstream/fastq_handler.py, config/settings.yaml
+
+Problem:
+  BWA alignment was using only 4 CPU threads (inherited from
+  deepvariant.num_shards). On this 192-core server, a 1.5 GB FASTQ file
+  timed out after 12 hours and the pipeline failed.
+
+Changes:
+  - Added separate bwa_threads: 32 setting in settings.yaml (independent
+    of DeepVariant num_shards — BWA runs on the host, not inside Docker)
+  - Added configurable bwa_timeout_hours: 6 (was hardcoded 12 h)
+  - BWA now uses 32 threads -> alignment completes in ~20-40 minutes
+  - Timeout error message now names the exact settings.yaml keys to change
+  - fastq_handler.py: _run_bwa_align() accepts timeout and threads as
+    parameters; run_fastq_to_vcf() reads bwa_threads and bwa_timeout_hours
+    from settings separately from DeepVariant's num_shards
+
+--------------------------------------------------------------------------------
+
+2. STOP ANALYSIS BUTTON (GUI)
+Files: gui/app.py, gui/runner.py, tests/gui/test_runner.py
+
+Problem:
+  The GUI had no way to cancel a running analysis. Once started, the user
+  had to wait for it to finish or crash.
+
+Changes:
+  - runner.py: start_pipeline_thread() now accepts a proc_holder=[None]
+    list that is populated with the live subprocess.Popen object the moment
+    the process starts, giving the GUI a handle to terminate it
+  - app.py: Added a red "Stop Analysis" button to the right of "Run Analysis"
+    - Disabled when idle; enabled while a run is in progress
+    - Clicking Stop shows a confirmation dialog
+    - On confirmation: sends SIGTERM to the pipeline process
+    - Status bar shows "Stopped — analysis was cancelled"
+    - Run button re-enables and Stop button disables on any completion
+  - 2 new tests: test_proc_holder_populated, test_stop_via_proc_holder
+
+--------------------------------------------------------------------------------
+
+3. PVS1 OVERCALLING FIX (ACMG)
+File: analysis/acmg/rules.py
+
+Problem:
+  PVS1 (Pathogenic Very Strong) was firing on any frameshift, stop-gained,
+  or canonical splice variant based purely on consequence type, regardless
+  of whether loss-of-function is the established disease mechanism for the
+  gene. This caused many variants to be incorrectly elevated to Likely
+  Pathogenic (PVS1 + PM2 = LP per ACMG Table 5).
+
+Changes:
+  - eval_PVS1() now requires BOTH conditions:
+      1. Primary consequence is a canonical null-variant type
+         (stop_gained, frameshift_variant, splice_acceptor_variant,
+          splice_donor_variant, start_lost)
+      2. LOFTEE classifies the variant as high-confidence LoF (loftee_lof == "HC")
+  - Without LOFTEE HC, PVS1 does not fire. The variant may still accumulate
+    PP3, PM2, etc. but cannot reach Likely Pathogenic on consequence alone
+  - All existing PVS1 tests updated to add loftee_lof="HC" where True expected
+  - 4 new LOFTEE-specific tests added:
+      test_stop_gained_without_loftee_hc_does_not_trigger
+      test_frameshift_with_loftee_lc_does_not_trigger
+      test_frameshift_with_loftee_hc_triggers
+      test_compound_with_null_and_loftee_hc_triggers
+
+--------------------------------------------------------------------------------
+
+4. GENE LIST USED AS TAG ONLY (NOT FILTER)
+File: analysis/filter_engine.py
+
+Problem:
+  Tier-3 variants (synonymous, UTR, intronic) outside the supplied gene
+  list were hard-excluded and invisible to the reviewer. This violated the
+  principle that all potentially relevant variants must be retained and
+  traceable.
+
+Changes:
+  - Gene list is now a tag only — it never causes a variant to be excluded
+  - All variants now get variant.gene_relevance set to one of:
+      "In supplied gene list"
+      "Outside supplied gene list"
+      "" (if no gene list was provided)
+  - Tier-3 variants not in the gene list -> deprioritized=True
+    (visible in the Deprioritized sheet, not silently discarded)
+  - _mark_gene_list() unchanged; new _set_gene_relevance() added
+
+--------------------------------------------------------------------------------
+
+5. AF FILTER: DEPRIORITIZE INSTEAD OF EXCLUDE
+File: analysis/filter_engine.py
+
+Problem:
+  Variants with gnomAD AF > 1% were hard-excluded. This could discard
+  clinically relevant variants, especially in under-represented populations
+  where AF references may not reflect true disease allele frequencies.
+
+Changes:
+  - Two-tier AF handling:
+
+    AF > 5% (BA1 threshold)  -> excluded=True  (stand-alone benign, unchanged)
+    AF 1-5%                  -> deprioritized=True (retained, shown separately)
+    AF < 1%                  -> retained normally
+
+  - ClinVar benign/likely-benign variants also moved from excluded -> deprioritized
+  - New helper functions:
+      _check_af_exclusion()      -- BA1-level exclusion only
+      _check_af_deprioritize()   -- 1-5% AF soft flag
+      _check_tier3_deprioritize() -- tier3 soft flag
+      _check_clinvar_deprioritize() -- ClinVar benign soft flag
+      _check_consequence_excluded() -- excluded tier only
+  - Replaced old _check_af_filter(), _check_consequence_filter(),
+    _check_clinvar_filter() with the new split functions
+  - get_filter_summary() updated to include deprioritized count
+
+--------------------------------------------------------------------------------
+
+6. QC METRICS EXTRACTED FROM VCF FORMAT COLUMN
+File: analysis/parser.py
+
+Problem:
+  Read depth, genotype quality, and allele depths were not captured from
+  the VCF FORMAT/sample columns. Reviewers had no QC visibility in reports.
+
+Changes:
+  - 4 new fields added to Variant dataclass:
+      depth             (int)   -- DP: total read depth
+      genotype_quality  (int)   -- GQ: genotype quality score
+      allele_depth      (str)   -- AD: "ref_count,alt_count"
+      vaf               (float) -- variant allele fraction = alt_AD / total_AD
+  - New _extract_qc_metrics(format_str, sample_str) -> dict function
+    parses all four from the FORMAT/sample columns
+  - _parse_record() calls _extract_qc_metrics() and passes results to
+    the Variant constructor
+  - Low values generate reviewer flags (see change 7):
+      DP < 20  -> "Low read depth (DP=X)"
+      GQ < 20  -> "Low genotype quality (GQ=X)"
+      VAF < 0.20 -> "Low VAF (X.XX) -- possible artefact or mosaic"
+
+--------------------------------------------------------------------------------
+
+7. REVIEWER FLAGS LAYER (NEW MODULE)
+Files: analysis/reviewer_flags.py (new), cli.py, config/settings.yaml,
+       tests/analysis/test_reviewer_flags.py (new)
+
+Problem:
+  No separation between strict ACMG classification (evidence-based) and
+  advisory guidance for human experts. Reviewers lacked a structured way
+  to quickly identify what needs attention without it influencing
+  classification.
+
+Changes:
+  - New module analysis/reviewer_flags.py with annotate_reviewer_flags()
+    entry point
+  - Called in cli.py after ACMG classification, before ranking (step 4b)
+  - Generates variant.reviewer_flags list on every variant
+  - These flags are ADVISORY ONLY -- they never affect ACMG classification
+  - Flag categories:
+
+    Gene list:
+      "In supplied gene list"
+      "Outside supplied gene list"
+
+    Population frequency:
+      "Absent from gnomAD"
+      "Very rare in gnomAD (AF=X.XXe-XX)"
+      "Rare in gnomAD (AF=X.XXXX)"
+      "Intermediate AF (AF=X.XXXX)"
+      "Common variant in gnomAD (AF=X.XXXX)"
+
+    Computational scores:
+      "Very high CADD (phred=XX.X)"
+      "High CADD (phred=XX.X)"
+      "High REVEL (X.XXX)"
+      "High SpliceAI (X.XXX) -- likely splice-altering"
+      "Moderate SpliceAI (X.XXX)"
+
+    LOFTEE:
+      "LOFTEE high-confidence LoF"
+      "LOFTEE low-confidence LoF (FILTER_REASON)"
+      "LoF consequence -- LOFTEE HC not confirmed (PVS1 not applied)"
+
+    ClinVar:
+      "ClinVar: conflicting interpretations"
+      "ClinVar: Pathogenic -- reviewed_by_expert_panel"
+      "ClinVar: Likely_benign"
+
+    QC:
+      "Low read depth (DP=X)"
+      "Low genotype quality (GQ=X)"
+      "Low VAF (X.XX) -- possible artefact or mosaic"
+      "FILTER=<value>"
+
+    ACMG context:
+      "Rare VUS -- warrants expert review"
+      "Strong ClinVar evidence (PS3)"
+      "Deprioritized: <reason>"
+
+  - Thresholds configurable in settings.yaml under reviewer_flags:
+      cadd_high: 20, cadd_very_high: 30, revel_high: 0.75
+      spliceai_high: 0.5, spliceai_moderate: 0.2
+      low_depth: 20, low_gq: 20, low_vaf: 0.20
+  - 40+ new tests in tests/analysis/test_reviewer_flags.py
+
+--------------------------------------------------------------------------------
+
+8. RESTRUCTURED EXCEL REPORT
+File: reporting/spreadsheet.py
+
+Problem:
+  The two-sheet report (Candidates + Excluded) did not reflect clinical
+  workflow. Pathogenic and VUS variants were mixed together. Excluded
+  variants were easy to miss. QC and reviewer context were missing.
+
+Changes:
+  - Report now has 7 sheets:
+
+    Sheet              Contents
+    -------            --------
+    Info               Sample metadata + mandatory disclaimer
+    Priority Review    Pathogenic + Likely Pathogenic variants
+    VUS                All VUS (never suppressed)
+    In Gene List       Other retained variants in the supplied gene list
+    High Impact        Tier1/Tier2 variants outside the gene list
+    Deprioritized      AF 1-5%, tier3, ClinVar benign (soft-excluded)
+    Excluded           Hard exclusions with reason
+
+  - New columns added to all sheets:
+      Gene Relevance          ("In supplied gene list" / "Outside supplied gene list")
+      Reviewer Flags          (pipe-separated list of advisory flags)
+      DP                      (read depth)
+      GQ                      (genotype quality)
+      AD                      (allele depth "ref,alt")
+      VAF                     (variant allele fraction)
+      Deprioritized           (Yes/No)
+      Deprioritization Reason (reason for soft deprioritization)
+
+  - _is_high_impact() helper: identifies tier1/tier2 consequence variants
+    for the "High Impact" sheet
+
+--------------------------------------------------------------------------------
+
+9. SPLICEAI INDEL FILE CONFIGURED
+File: config/paths.yaml
+
+What happened:
+  The SpliceAI indel score file was missing, causing the SpliceAI plugin
+  to run in SNV-only mode and the SpliceAI column to be empty for indels.
+
+Changes:
+  - Downloaded spliceai_scores.raw.indel.hg38.vcf.gz (69.2 GB) from
+    Illumina BaseSpace (File ID 16525003580, Project 66029966)
+  - .tbi index file was already present
+  - paths.yaml updated: spliceai_indel_file -> status: found
+    path: /mnt/server_share/Reference_Material/annotation/
+          spliceai_scores.raw.indel.hg38.vcf.gz
+  - Setup re-validated: all required checks passed
+  - SpliceAI now runs with both SNV and indel files
+
+================================================================================
+
+TEST SUMMARY
+------------
+Before: 931 tests (all passing)
+After:  983 tests (all passing)
+New:    +52 tests
+
+New test files:
+  tests/analysis/test_reviewer_flags.py  (40+ tests)
+
+Updated test files:
+  tests/analysis/acmg/test_rules.py       (PVS1 LOFTEE requirement)
+  tests/analysis/acmg/test_classifier.py  (PVS1 downstream effects)
+  tests/analysis/test_filter_engine.py    (AF/tier3 deprioritization)
+  tests/gui/test_runner.py                (stop via proc_holder)
+  tests/reporting/test_spreadsheet.py     (7-sheet structure)
+  tests/test_vcf_routing.py               (new Variant fields)
+
+================================================================================

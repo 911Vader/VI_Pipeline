@@ -1,0 +1,92 @@
+# =============================================================================
+# VI_Pipeline .gitignore
+# =============================================================================
+
+# --- Run outputs (large files, patient data) ---
+runs/*/FastQ_Input/
+runs/*/BAM_Input/
+runs/*/*.bam
+runs/*/*.bai
+runs/*/*.cram
+runs/*/*.crai
+runs/*/*.vcf
+runs/*/*.vcf.gz
+runs/*/*.vcf.gz.tbi
+runs/*/*.norm.vcf*
+runs/*/*.vep.vcf*
+runs/*/*.dv.*
+runs/*/*.sorted.*
+runs/*/*.dedup.*
+runs/*/*.json
+runs/*/*.tsv
+runs/*/*.xlsx
+runs/*/*.pdf
+runs/*/*.fastq*
+runs/*/*.fq*
+runs/*/*.log
+runs/*/vep_filter/
+runs/*/happy_output/*.vcf*
+runs/*/happy_output/*.gz
+runs/*/happy_output/*.tbi
+runs/*/happy_output/*.csv.gz
+runs/*/happy_output/*.json*
+
+# Keep NIST validation summary files
+!runs/*/happy_output/*.html
+!runs/*/happy_output/*.summary.csv
+!runs/*/happy_output/*.extended.csv
+
+# --- Config: machine-specific paths (use paths.yaml.example instead) ---
+config/paths.yaml
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.env
+.venv
+env/
+venv/
+
+# --- Testing ---
+.pytest_cache/
+.coverage
+htmlcov/
+*.xml
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.Rhistory
+
+# --- Logs and temp ---
+*.log
+/tmp/
+
+# --- Claude internal session data ---
+.claude/
+
+# --- VCF/data files in root ---
+*.vcf
+*.vcf.gz
+*.vcf.gz.tbi
+*.vcf.bgz
+*.tbi
+
+# --- Large input FASTQs ---
+input/
+
+# --- Test data large files ---
+test_data/*.bam
+test_data/*.bai
+test_data/*.fastq.gz
+test_data/*.fq.gz

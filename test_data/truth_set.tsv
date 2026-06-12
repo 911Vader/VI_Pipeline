@@ -1,0 +1,34 @@
+# VI_Pipeline — Example Validation Truth Set
+# ─────────────────────────────────────────────────────────────────
+# FORMAT (tab-separated):
+#   variant_id              chrom:pos:ref:alt  (GRCh38, match VCF exactly)
+#   gene                    gene symbol
+#   hgvs_c                  HGVS coding (optional)
+#   hgvs_p                  HGVS protein (optional)
+#   expected_classification Pathogenic | Likely Pathogenic | VUS | Likely Benign | Benign
+#   expected_acmg_codes     space-separated ACMG codes (optional; for code-level concordance)
+#   curator_notes           free text (optional)
+#
+# IMPORTANT: Replace these example entries with your actual curated variants.
+# Each variant must be present in the annotated VCF supplied to validate.py.
+# Coordinates must exactly match the VCF CHROM/POS/REF/ALT fields.
+# ─────────────────────────────────────────────────────────────────
+variant_id	gene	hgvs_c	hgvs_p	expected_classification	expected_acmg_codes	curator_notes
+# === PATHOGENIC ===
+chr17:43071077:A:AAGAA	BRCA1	c.5266dupC	p.Gln1756ProfsTer74	Pathogenic	PVS1 PS3 PM2	Classic BRCA1 frameshift; ClinVar P expert panel 4-star. PVS1 requires LOFTEE HC.
+chr17:43057051:G:GA	BRCA1	c.3756_3759delGTCT	p.Ser1253ArgfsTer10	Pathogenic	PVS1 PS3	BRCA1 frameshift; ClinVar P multiple submitters 2-star.
+chr13:32339659:TTTACA:T	BRCA2	c.6275_6280delTTACAA	p.Leu2092HisfsTer7	Pathogenic	PVS1 PS3 PM2	BRCA2 frameshift deletion; ClinVar P expert panel.
+chr17:7674220:C:T	TP53	c.817C>T	p.Arg273Cys	Pathogenic	PS3 PM2 PP3	TP53 hotspot missense; ClinVar P multiple submitters. PP3 fires only if ≥2 independent tool groups agree.
+# === LIKELY PATHOGENIC ===
+chr5:112839514:G:A	APC	c.3927C>A	p.Tyr1309Ter	Likely Pathogenic	PVS1 PM2	APC stop-gained; absent from gnomAD; ClinVar 1-star only — PS3 must NOT fire (insufficient review status).
+chr2:215593420:C:T	EPCAM	c.499C>T	p.Arg167Cys	Likely Pathogenic	PM2 PP3	EPCAM missense; absent from gnomAD; multiple in-silico tools damaging.
+# === VUS ===
+chr17:43082434:A:G	BRCA1	c.4837A>G	p.Ser1613Gly	VUS		BRCA1 missense; absent from gnomAD; in-silico tools conflicting. VUS by evidence balance.
+chr13:32355250:T:C	BRCA2	c.6544T>C	p.Ser2182Pro	VUS	PM2	BRCA2 missense; rare in gnomAD (AF ~0.0001); REVEL ~0.4 (gray zone). VUS.
+chr12:25398284:C:T	KRAS	c.35G>A	p.Gly12Asp	VUS	PM2	KRAS codon 12; in germline context insufficient evidence for LP without functional data.
+# === LIKELY BENIGN ===
+chr17:43106435:G:A	BRCA1	c.2612C>T	p.Pro871Leu	Likely Benign	BS1 BP4	BRCA1 common missense; gnomAD AF ~0.006 (exceeds BS1 1% threshold); REVEL low.
+chr7:117587799:C:T	CFTR	c.1408G>A	p.Val470Met	Likely Benign	BS1 BP4	CFTR common polymorphism; AF ~0.3 in some European subpops — BA1 fires at global AF; BS1 fires if sub-BA1.
+# === BENIGN ===
+chr17:43094692:G:A	BRCA1	c.3548A>G	p.Lys1183Arg	Benign	BA1 BP7	BRCA1 synonymous; gnomAD global AF ~0.08; BA1 must fire. No splice impact expected — BP7 should also fire.
+chr1:228341816:C:T	MUTYH	c.934-2A>C	.	Benign	BA1	Intronic variant; gnomAD global AF > 5%; BA1 stand-alone benign must fire.

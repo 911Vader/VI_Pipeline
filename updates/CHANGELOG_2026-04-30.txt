@@ -1,0 +1,126 @@
+VI_Pipeline — Change Log
+Date: 2026-04-30
+================================================================================
+
+SUMMARY
+-------
+5 annotation bugs fixed — all caused silent data loss in the VEP output.
+REVEL scores, ClinVar fields, and SpliceAI scores were being dropped or
+read from the wrong location. SpliceAI.pm crashed when the indel file was
+absent.
+
+================================================================================
+
+1. REVEL PLUGIN ARGUMENT FIX
+File: analysis/annotator.py
+
+Problem:
+  Pipeline passed "grch38" as a second positional argument to the REVEL
+  plugin:
+    --plugin REVEL,<file>,grch38
+  REVEL.pm interprets the second positional arg as "no_match" — a flag to
+  suppress unmatched variants — not as an assembly selector. The string
+  "grch38" evaluates as truthy, so REVEL silently dropped all scores where
+  the variant position did not match exactly. REVEL column was empty for
+  most variants.
+
+Changes:
+  - Removed the erroneous "grch38" argument
+  - Plugin call is now:  --plugin REVEL,<file>
+  - REVEL scores now populate correctly for all variants
+
+--------------------------------------------------------------------------------
+
+2. MetaRNN -> MetaSVM (dbNSFP column mismatch)
+Files: analysis/annotator.py, analysis/parser.py, reporting/spreadsheet.py,
+       config/settings.yaml
+
+Problem:
+  Pipeline requested MetaRNN_score from dbNSFP 4.1a. That column does not
+  exist in this version of the database — it was introduced in a later
+  release. No scores were returned, and the column was blank.
+
+Changes:
+  - Replaced MetaRNN_score with MetaSVM_score + MetaSVM_pred throughout
+  - settings.yaml: dbnsfp_columns list updated (MetaRNN_score removed,
+    MetaSVM_score and MetaSVM_pred added)
+  - parser.py: Variant dataclass field renamed
+      metarnn_score  ->  metasvm_score
+      metasvm_pred added as a new field
+  - spreadsheet.py: column header renamed "MetaRNN" -> "MetaSVM";
+    "MetaSVM Pred" column added
+  - annotator.py: dbNSFP plugin columns string updated
+
+--------------------------------------------------------------------------------
+
+3. CLINVAR FIELDS ALWAYS EMPTY
+File: analysis/parser.py
+
+Problem:
+  Parser called _extract_clinvar(info_dict), attempting to read ClinVar
+  fields from the VCF INFO column. However, VEP --custom injects ClinVar
+  data inside each per-transcript CSQ entry, not as standalone INFO keys.
+  The INFO column had no ClinVar fields, so clinvar_significance,
+  clinvar_review_status, and clinvar_disease were always None.
+  Consequence: PS3 never fired and the ClinVar column in the report was
+  always blank — including for RYR1 which is listed as Pathogenic in ClinVar.
+
+Changes:
+  - Changed ClinVar extraction to read from primary.raw (the CSQ transcript
+    dict for the canonical transcript):
+      clinvar_raw = primary.raw if primary else {}
+  - _extract_clinvar() now operates on the CSQ dict instead of info_dict
+  - ClinVar fields now populate correctly; PS3 fires for expert-panel-reviewed
+    pathogenic variants
+  - Test renamed: test_clinvar_from_info_field -> test_clinvar_from_csq_field
+    and updated to use the correct VEP CSQ output format
+
+--------------------------------------------------------------------------------
+
+4. SPLICEAI PLUGIN CRASH (SpliceAI.pm)
+File: ~/.vep/Plugins/SpliceAI.pm
+
+Problem:
+  SpliceAI.pm called add_file($param_hash->{indel}) unconditionally during
+  plugin initialisation. When only the SNV file was configured (no indel file
+  present), $param_hash->{indel} was undef. The add_file() call with an
+  undefined argument triggered a fatal "No file specified" error, and the
+  entire VEP run failed immediately.
+
+Changes:
+  - Added defined() guards before each add_file() call:
+      $self->add_file($param_hash->{snv})   if defined($param_hash->{snv});
+      $self->add_file($param_hash->{indel}) if defined($param_hash->{indel});
+  - VEP now runs successfully when only the SNV file is configured
+  - Plugin gracefully skips the indel file when it is absent
+
+--------------------------------------------------------------------------------
+
+5. SPLICEAI SCORES NOT PARSED (WRONG LOCATION)
+File: analysis/parser.py
+
+Problem:
+  The SpliceAI VEP plugin writes delta scores to dedicated INFO fields
+  (SpliceAI_pred_DS_AG, SpliceAI_pred_DS_AL, SpliceAI_pred_DS_DG,
+  SpliceAI_pred_DS_DL) when VEP runs in --vcf mode. The parser was
+  reading spliceai_max_ds from the CSQ transcript dict, where no SpliceAI
+  data is present in --vcf mode. The SpliceAI column in the report was
+  always empty.
+
+Changes:
+  - Added _extract_spliceai_max(info_dict) that reads the four delta-score
+    INFO fields and returns the maximum value
+  - parse_record() now applies a two-step lookup:
+      spliceai_info = _extract_spliceai_max(info_dict)
+      v.spliceai_max_score = spliceai_info if spliceai_info is not None
+                             else primary.spliceai_max_ds
+  - Falls back to CSQ for VCFs annotated by other toolchains that embed
+    SpliceAI scores inside the transcript block
+
+================================================================================
+
+TEST SUMMARY
+------------
+Baseline established: all tests passing at session start.
+
+================================================================================

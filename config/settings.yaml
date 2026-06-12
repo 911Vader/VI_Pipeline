@@ -1,0 +1,221 @@
+# =============================================================================
+# VI_Pipeline - Analysis Settings
+# Version 1 — GRCh38, single sample, SNVs and small indels only
+#
+# Edit this file to adjust filtering thresholds and analysis behaviour.
+# Do NOT edit paths.yaml by hand — it is written by the setup module.
+# =============================================================================
+
+pipeline:
+  version: "1.0.0"
+  genome_build: "GRCh38"
+
+# ---------------------------------------------------------------------------
+# Metadata defaults
+# These values are overridden by --sample-id / --case-id / --metadata-file
+# at runtime.
+# ---------------------------------------------------------------------------
+metadata:
+  sample_id: "UNKNOWN_SAMPLE"
+  case_id: ""
+  phenotype_terms: []          # HPO terms or free text; optional
+
+# ---------------------------------------------------------------------------
+# Filtering rules
+# ---------------------------------------------------------------------------
+filtering:
+  # Retain only PASS variants. Set to false to include all FILTER values.
+  require_pass: true
+
+  # Rare variant allele frequency cutoff (gnomAD AF)
+  max_af: 0.01
+
+  # Consequence tiers (ordered high → low priority)
+  # Variants matching tier 1 are always retained; tier 3 may be dropped.
+  consequence_tiers:
+    tier1:                     # Always retain
+      - "stop_gained"
+      - "frameshift_variant"
+      - "splice_acceptor_variant"
+      - "splice_donor_variant"
+      - "start_lost"
+      - "stop_lost"
+    tier2:                     # Retain unless strong benign evidence
+      - "missense_variant"
+      - "splice_region_variant"
+      - "inframe_insertion"
+      - "inframe_deletion"
+    tier3:                     # Retain only if in gene list or ClinVar P/LP
+      - "synonymous_variant"
+      - "5_prime_UTR_variant"
+      - "3_prime_UTR_variant"
+      - "intron_variant"
+    excluded:                  # Drop unless overridden
+      - "intergenic_variant"
+      - "downstream_gene_variant"
+      - "upstream_gene_variant"
+
+  # Exclude variants with these ClinVar significances (case-insensitive match)
+  exclude_clinvar_significances:
+    - "benign"
+    - "likely benign"
+
+# ---------------------------------------------------------------------------
+# ACMG/AMP classification — v1 subset
+#
+# Only the criteria listed under 'active_criteria' will be evaluated.
+# The code is structured for future expansion to the full 28-criterion set.
+# ---------------------------------------------------------------------------
+acmg:
+  # Criteria listed here are for documentation only — the classifier always
+  # evaluates exactly the rules in analysis/acmg/rules.IMPLEMENTED_RULES.
+  # Criteria requiring data not available from a single-sample VCF + VEP run
+  # (PS1, PM1, PM5, PP2, BS2) are intentionally absent — they cannot fire.
+  active_criteria:
+    pathogenic_very_strong:
+      - "PVS1"             # Null variant in gene where LoF is disease mechanism
+    pathogenic_strong:
+      - "PS3"              # Well-established functional studies (ClinVar review status proxy)
+    pathogenic_moderate:
+      - "PM2"              # Absent / extremely rare in population databases
+      - "PM4"              # Protein length change (in-frame indel)
+    pathogenic_supporting:
+      - "PP3"              # Multiple in-silico tools predict damaging
+    benign_stand_alone:
+      - "BA1"              # AF > 5% in population databases
+    benign_strong:
+      - "BS1"              # AF greater than expected for disorder
+    benign_supporting:
+      - "BP4"              # Multiple in-silico tools predict benign
+      - "BP7"              # Synonymous variant — no predicted splice impact
+
+  # Population AF thresholds used by BA1, BS1, and PM2 rules.
+  # Defaults match ACMG/AMP 2015 guidelines; adjust per disorder prevalence.
+  ba1_af_threshold: 0.05      # >= 5%  → BA1 stand-alone benign
+  bs1_af_threshold: 0.01      # >= 1%  → BS1 strong benign (above expected)
+  pm2_af_threshold: 0.0001    # <= 0.01% → PM2 moderate pathogenic (extremely rare)
+
+  # Not implemented in v1 — require data sources unavailable from VCF + VEP:
+  #   PS1  — per-amino-acid ClinVar lookup
+  #   PM1  — curated mutational-hotspot database
+  #   PM5  — per-codon ClinVar lookup (novel missense at pathogenic codon)
+  #   PP2  — per-gene missense-constraint metrics (gnomAD pLoF)
+  #   BS2  — healthy-adult zygosity counts
+
+  # In-silico score thresholds used for PP3 / BP4
+  insilico_thresholds:
+    cadd_phred_pathogenic: 20      # >= this → supports pathogenic
+    revel_pathogenic: 0.75         # >= this → supports pathogenic
+    revel_benign: 0.15             # <= this → supports benign
+    spliceai_high: 0.5             # >= this → high splice impact (SOP: ≥0.5)
+    spliceai_low: 0.1              # <= this → low splice impact  (SOP: <0.1)
+    alphamissense_pathogenic: 0.564  # >= this → supports pathogenic (SOP threshold)
+    alphamissense_benign: 0.340      # <= this → supports benign     (SOP threshold)
+
+# ---------------------------------------------------------------------------
+# VEP annotation settings
+# These control how the VEP CLI command is constructed.
+# Paths are never set here — they come from config/paths.yaml (auto-generated
+# by the setup module).
+# ---------------------------------------------------------------------------
+vep:
+  # Number of parallel forks VEP will use. Set to 1 on low-memory systems.
+  fork: 192
+
+  # Number of variants VEP loads into memory per batch.
+  # Higher values use more RAM but reduce overhead. 100000 is safe for 1 TB RAM.
+  buffer_size: 100000
+
+  # Hard timeout for a single VEP annotation run (hours).
+  # Set to 0 to disable the timeout entirely.
+  timeout_hours: 0
+
+  # Skip re-annotation if the output VCF already exists and contains a valid
+  # VEP CSQ header.  Useful when re-running a failed downstream step without
+  # wanting to repeat a multi-hour annotation.  Set to false to always re-run.
+  skip_if_annotated_exists: true
+
+  # Distance (bp) upstream/downstream of a variant to assign to a gene.
+  distance: 5000
+
+  # Any additional raw VEP flags to append verbatim to the command.
+  # Use with care. Example: ["--everything"] or ["--pick"]
+  extra_flags: []
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+reporting:
+  max_candidates_in_report: 20   # Top N variants shown in PDF
+
+  # Maximum rows written to the Excluded and Deprioritized sheets in the XLSX report.
+  # WGS datasets routinely produce millions of excluded variants; writing them all
+  # to Excel is very slow.  Full data is always available in the JSON export.
+  # Set to 0 to write all rows (not recommended for WGS — can take 20+ minutes).
+  max_xlsx_excluded_rows: 100000
+
+  disclaimer: >
+    Top genomic candidate(s) requiring expert review.
+    Variant pathogenicity alone does not prove cause of death.
+
+# ---------------------------------------------------------------------------
+# DeepVariant variant calling settings
+# Used only when running from FASTQ input (python cli.py --input sample.fastq.gz).
+# DeepVariant runs inside the official Docker image (google/deepvariant:<version>).
+# The image is pulled automatically on first use (~1 GB download).
+# ---------------------------------------------------------------------------
+deepvariant:
+  # Docker image version to use.
+  version: "1.10.0"
+
+  # Sequencing model. Use WGS for whole-genome, WES for whole-exome.
+  model_type: WGS
+
+  # Number of parallel shards (== CPU threads used inside the container).
+  # This server has 192 CPUs and 1 TB RAM; 192 shards uses all cores.
+  num_shards: 192
+
+  # Hard timeout for a single DeepVariant run (hours).
+  # Set to 0 to disable the timeout entirely.
+  timeout_hours: 0
+
+  # CPU threads for BWA MEM alignment + samtools sort.
+  # Independent of num_shards — BWA runs on the host, not inside Docker.
+  # 64 threads saturates BWA throughput; 192 adds RAM pressure without speed gain.
+  bwa_threads: 64
+
+  # Hard timeout for BWA alignment (hours). Set to 0 to disable.
+  bwa_timeout_hours: 0
+
+  # Generate the DeepVariant HTML QC report (.dv.visual_report.html).
+  # Set to true to produce the report; false (default) suppresses it.
+  visual_report: false
+
+  # Duplicate marking/removal (position-based, coordinate-sorted BAM).
+  # Tool preference: sambamba (fastest) → picard → samtools (always available).
+  # Set markdup_tool to "" or null to skip duplicate marking entirely.
+  markdup_tool: "samtools"
+  remove_duplicates: true
+  markdup_timeout_hours: 0
+
+# ---------------------------------------------------------------------------
+# Reviewer flag thresholds
+# Used by analysis/reviewer_flags.py to annotate reviewer-facing flags.
+# These do NOT affect ACMG classification.
+# ---------------------------------------------------------------------------
+reviewer_flags:
+  # CADD thresholds for reviewer flags
+  cadd_high:      20    # flag as "High CADD"
+  cadd_very_high: 30    # flag as "Very high CADD"
+
+  # REVEL threshold for reviewer flag
+  revel_high: 0.75
+
+  # SpliceAI thresholds
+  spliceai_high:     0.5   # likely splice-altering
+  spliceai_moderate: 0.2   # possible splice impact
+
+  # QC thresholds
+  low_depth: 20     # DP below this → "Low read depth" flag
+  low_gq:    20     # GQ below this → "Low genotype quality" flag
+  low_vaf:   0.20   # VAF below this → "Low VAF" flag
