@@ -23,9 +23,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+from reporting import PIPELINE_VERSION
 
-PIPELINE_VERSION = "1.0.0"
+logger = logging.getLogger(__name__)
 
 
 class RunLog:

@@ -222,7 +222,8 @@ class TestRunBwaAlign:
         sort_result.returncode = sort_rc
         sort_result.stderr = "sort stderr" if sort_rc != 0 else ""
 
-        with patch("subprocess.Popen", return_value=bwa_proc), \
+        with patch("analysis.upstream.fastq_handler.shutil.which", return_value=None), \
+             patch("subprocess.Popen", return_value=bwa_proc), \
              patch("subprocess.run", return_value=sort_result):
             return _run_bwa_align(
                 "/usr/bin/bwa", "/usr/bin/samtools", "/data/genome.fa",
@@ -381,8 +382,10 @@ class TestRunFastqToVcf:
              patch("analysis.upstream.fastq_handler._get_docker", return_value="/usr/local/bin/docker"), \
              patch("analysis.upstream.fastq_handler._get_reference_fasta", return_value="/data/GRCh38.fa"), \
              patch("analysis.upstream.fastq_handler._get_bwa_index_prefix", return_value="/data/GRCh38.fa"), \
+             patch("analysis.upstream.fastq_handler._run_seqkit_pair", return_value=("R1.fastq.gz", "R2.fastq.gz")), \
              patch("analysis.upstream.fastq_handler._run_bwa_align", return_value=sorted_bam), \
              patch("analysis.upstream.fastq_handler._run_samtools_index"), \
+             patch("analysis.upstream.fastq_handler._run_markdup", return_value=sorted_bam), \
              patch("analysis.upstream.fastq_handler._run_deepvariant", return_value=raw_vcf):
             return run_fastq_to_vcf(
                 fastq_r1="R1.fastq.gz",
@@ -467,6 +470,7 @@ class TestRunFastqToVcf:
              patch("analysis.upstream.fastq_handler._get_bwa_index_prefix", return_value="/data/GRCh38.fa"), \
              patch("analysis.upstream.fastq_handler._run_bwa_align", return_value=sorted_bam), \
              patch("analysis.upstream.fastq_handler._run_samtools_index"), \
+             patch("analysis.upstream.fastq_handler._run_markdup", return_value=sorted_bam), \
              patch("analysis.upstream.fastq_handler._run_deepvariant",
                    side_effect=RuntimeError("DeepVariant exited with code 1")):
             with pytest.raises(RuntimeError, match="DeepVariant"):
@@ -486,6 +490,7 @@ class TestRunFastqToVcf:
              patch("analysis.upstream.fastq_handler._get_bwa_index_prefix", return_value="/data/GRCh38.fa"), \
              patch("analysis.upstream.fastq_handler._run_bwa_align", return_value=sorted_bam_path), \
              patch("analysis.upstream.fastq_handler._run_samtools_index"), \
+             patch("analysis.upstream.fastq_handler._run_markdup", return_value=sorted_bam_path), \
              patch("analysis.upstream.fastq_handler._run_deepvariant", return_value=raw_vcf_path):
             run_fastq_to_vcf(
                 "R1.fastq.gz", None, "SAMPLE", new_dir,

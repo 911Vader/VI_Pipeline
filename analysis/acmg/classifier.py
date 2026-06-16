@@ -96,6 +96,7 @@ def classify_variant(
       confidence:              "High", "Moderate", or "Low".
     """
     triggered: List[str] = []
+    skipped: List[str] = []
 
     for code, rule_fn in IMPLEMENTED_RULES.items():
         try:
@@ -108,17 +109,44 @@ def classify_variant(
         except Exception as exc:
             # Rule evaluation errors must never crash the pipeline.
             # Missing or malformed fields produce no code, not an exception.
+            # Tracked separately so the output distinguishes "did not fire"
+            # from "threw an exception and was skipped".
             logger.warning(
-                "Rule %s raised an unexpected error for %s:%s — skipping. Error: %s",
-                code, variant.chrom, variant.pos, exc,
+                "Rule %s raised an unexpected error for %s:%s (%s: %s) — skipping",
+                code, variant.chrom, variant.pos, type(exc).__name__, exc,
             )
+            skipped.append(code)
+
+    # Propagate skipped rules so they are visible in per-variant output.
+    variant.acmg_skipped_rules = skipped
+    if skipped:
+        logger.warning(
+            "%s:%s — %d ACMG rule(s) skipped due to errors: %s",
+            variant.chrom, variant.pos, len(skipped), skipped,
+        )
 
     category = classify(triggered)
     confidence = _compute_confidence(category, variant)
 
+    # Populate decision trace for this variant.
+    variant.decision_trace["acmg"] = {
+        "rules_evaluated": list(IMPLEMENTED_RULES.keys()),
+        "rules_triggered": triggered,
+        "rules_skipped_due_to_error": skipped,
+        "classification": str(category),
+        "confidence": confidence,
+        "scores_used": {
+            "gnomad_af":          variant.gnomad_af,
+            "cadd_phred":         variant.cadd_phred,
+            "revel_score":        variant.revel_score,
+            "spliceai_max_score": variant.spliceai_max_score,
+            "alphamissense_score":variant.alphamissense_score,
+        },
+    }
+
     logger.debug(
-        "%s:%s — codes=%s classification=%s confidence=%s",
-        variant.chrom, variant.pos, triggered, category, confidence,
+        "%s:%s — codes=%s classification=%s confidence=%s skipped=%s",
+        variant.chrom, variant.pos, triggered, category, confidence, skipped,
     )
     return triggered, category, confidence
 
@@ -190,8 +218,19 @@ def get_classification_summary(variants: List[Variant]) -> dict:
         else:
             by_category[cat] = by_category.get(cat, 0) + 1
 
+    # Aggregate skipped-rule counts so the run log can flag abnormal runs.
+    skipped_counts: dict = {}
+    variants_with_skipped = 0
+    for v in variants:
+        if v.acmg_skipped_rules:
+            variants_with_skipped += 1
+            for code in v.acmg_skipped_rules:
+                skipped_counts[code] = skipped_counts.get(code, 0) + 1
+
     return {
-        "total":        len(variants),
-        "by_category":  by_category,
-        "unclassified": unclassified,
+        "total":                    len(variants),
+        "by_category":              by_category,
+        "unclassified":             unclassified,
+        "variants_with_rule_errors":variants_with_skipped,
+        "rule_error_counts":        skipped_counts,
     }

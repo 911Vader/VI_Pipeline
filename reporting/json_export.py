@@ -23,10 +23,9 @@ from pathlib import Path
 from typing import List, Optional
 
 from analysis.parser import Variant
+from reporting import PIPELINE_VERSION
 
 logger = logging.getLogger(__name__)
-
-PIPELINE_VERSION = "1.0.0"
 
 #: Mandatory disclaimer — must appear verbatim in all outputs.
 MANDATORY_DISCLAIMER = (

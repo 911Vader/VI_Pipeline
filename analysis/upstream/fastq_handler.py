@@ -33,8 +33,10 @@ Output consumed by:
   analysis/parser.py     ->  variant parsing
 """
 
+import gzip
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -625,6 +627,42 @@ def _run_bwa_align(
     return sorted_bam
 
 
+def _bam_is_intact(samtools_exe: str, bam_path: str) -> bool:
+    """
+    Return True if bam_path passes samtools quickcheck.
+
+    quickcheck verifies the EOF block, catching files truncated mid-write
+    by a crash.  Returns False on any failure so the step is re-run.
+    """
+    try:
+        result = subprocess.run(
+            [samtools_exe, "quickcheck", bam_path],
+            capture_output=True,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _vcf_has_records(vcf_path: str) -> bool:
+    """
+    Return True if vcf_path contains at least one non-header data record.
+
+    Guards against resuming from a VCF written by a process that crashed
+    after creating the file and writing headers but before any records.
+    """
+    try:
+        lower = vcf_path.lower()
+        open_fn = gzip.open if lower.endswith((".gz", ".bgz")) else open
+        with open_fn(vcf_path, "rt", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line and not line.startswith("#"):
+                    return True
+        return False
+    except Exception:
+        return False
+
+
 def _run_samtools_index(samtools_exe: str, bam_path: str, threads: int = 192) -> None:
     """Index a sorted BAM with samtools index."""
     cmd = [samtools_exe, "index", "-@", str(threads), bam_path]
@@ -636,6 +674,83 @@ def _run_samtools_index(samtools_exe: str, bam_path: str, threads: int = 192) ->
             f"  stderr: {result.stderr.strip()}"
         )
     logger.debug("BAM index written: %s.bai", bam_path)
+
+
+def _run_flagstat(
+    samtools_exe: str,
+    bam_path: str,
+    out_dir: str,
+    sample_id: str,
+    threads: int = 8,
+) -> dict:
+    """
+    Run samtools flagstat and write results to {sample_id}.flagstat.txt.
+
+    Parses key QC metrics and logs warnings for problems that would cause
+    DeepVariant to waste hours on a bad BAM.  Never raises — failures are
+    logged and an empty dict is returned so the pipeline continues.
+
+    Returns a dict with "total_reads" and "mapped_reads" on success.
+    """
+    out_file = str(Path(out_dir) / f"{sample_id}.flagstat.txt")
+    cmd = [samtools_exe, "flagstat", "-@", str(threads), bam_path]
+
+    logger.info("BAM QC — samtools flagstat: %s", bam_path)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        logger.warning("samtools flagstat timed out after 5 minutes — skipping BAM QC")
+        return {}
+    except Exception as exc:
+        logger.warning("samtools flagstat could not run — skipping BAM QC: %s", exc)
+        return {}
+
+    if result.returncode != 0:
+        logger.warning(
+            "samtools flagstat returned exit code %d — skipping BAM QC", result.returncode,
+        )
+        return {}
+
+    try:
+        Path(out_file).write_text(result.stdout)
+        logger.info("Flagstat written: %s", out_file)
+    except Exception:
+        pass
+
+    total = 0
+    mapped = 0
+    for line in result.stdout.splitlines():
+        m_total = re.match(r"^(\d+)\s+\+\s+\d+\s+in total\b", line)
+        if m_total:
+            total = int(m_total.group(1))
+            continue
+        # "mapped" line but NOT "primary mapped"
+        m_mapped = re.match(r"^(\d+)\s+\+\s+\d+\s+mapped\b", line)
+        if m_mapped and "primary" not in line:
+            mapped = int(m_mapped.group(1))
+
+    if total == 0:
+        logger.error(
+            "BAM QC: BAM contains no reads — DeepVariant will produce no output: %s",
+            bam_path,
+        )
+    elif mapped == 0:
+        logger.error(
+            "BAM QC: 0 reads mapped — DeepVariant will produce no variants: %s",
+            bam_path,
+        )
+    else:
+        pct = mapped / total * 100
+        if pct < 70.0:
+            logger.warning(
+                "BAM QC: low mapping rate %.1f%% (%d / %d reads mapped) — "
+                "check alignment quality before proceeding with DeepVariant: %s",
+                pct, mapped, total, bam_path,
+            )
+        else:
+            logger.info("BAM QC: %.1f%% mapped (%d / %d reads)", pct, mapped, total)
+
+    return {"total_reads": total, "mapped_reads": mapped}
 
 
 def _run_deepvariant(
@@ -859,7 +974,9 @@ def run_fastq_to_vcf(
         if sync_tool:
             r1_synced = str(out / f"{sample_id}.r1.synced.fastq.gz")
             r2_synced = str(out / f"{sample_id}.r2.synced.fastq.gz")
-            if Path(r1_synced).exists() and Path(r2_synced).exists():
+            if (Path(r1_synced).exists() and Path(r2_synced).exists()
+                    and Path(r1_synced).stat().st_size > 0
+                    and Path(r2_synced).stat().st_size > 0):
                 logger.info(
                     "Resuming: synced FASTQs already exist — skipping sync: %s / %s",
                     r1_synced, r2_synced,
@@ -903,7 +1020,8 @@ def run_fastq_to_vcf(
     _fire(0)  # → "Aligning reads  (BWA)"
     sorted_bam = str(out / f"{sample_id}.sorted.bam")
     bam_index  = sorted_bam + ".bai"
-    if Path(sorted_bam).exists() and Path(bam_index).exists():
+    if (Path(sorted_bam).exists() and Path(bam_index).exists()
+            and _bam_is_intact(samtools_exe, sorted_bam)):
         logger.info("Resuming: sorted BAM already exists — skipping alignment: %s", sorted_bam)
     else:
         _run_bwa_align(
@@ -936,7 +1054,8 @@ def run_fastq_to_vcf(
         dedup_bam = str(out / f"{sample_id}.dedup.bam")
         dedup_bai = dedup_bam + ".bai"
 
-        if Path(dedup_bam).exists() and Path(dedup_bai).exists():
+        if (Path(dedup_bam).exists() and Path(dedup_bai).exists()
+                and _bam_is_intact(samtools_exe, dedup_bam)):
             logger.info(
                 "Resuming: dedup BAM already exists — skipping duplicate marking: %s",
                 dedup_bam,
@@ -963,9 +1082,12 @@ def run_fastq_to_vcf(
 
     _fire(2)  # → "Calling variants  (DeepVariant)"
 
+    # --- BAM QC: flagstat before the expensive DeepVariant step ---
+    _run_flagstat(samtools_exe, bam_for_calling, str(out), sample_id, threads=bwa_threads)
+
     # --- Step 3: Call variants with DeepVariant ---
     expected_vcf = str(out / f"{sample_id}.dv.vcf.gz")
-    if Path(expected_vcf).exists():
+    if Path(expected_vcf).exists() and _vcf_has_records(expected_vcf):
         logger.info("Resuming: DeepVariant VCF already exists — skipping variant calling: %s", expected_vcf)
         raw_vcf = expected_vcf
     else:

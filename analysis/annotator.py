@@ -202,33 +202,40 @@ def _build_plugin_args(paths_config: dict, settings: dict) -> List[str]:
     loftee_gerp_bw  = _get_optional_path(paths_config, "resources", "loftee_gerp_bigwig")
 
     if loftee_dir:
-        plugin_parts = [f"LoF", f"loftee_path:{loftee_dir}"]
+        # Pre-flight: check which helper files are missing and warn upfront.
+        # human_ancestor_fa and conservation_file are the two filters that most
+        # affect HC vs LC classification accuracy; missing either degrades calls.
+        missing_helpers: List[Tuple[str, str]] = []
+        if not loftee_human:
+            missing_helpers.append((
+                "human_ancestor_fa",
+                "ancestral allele filter disabled — HC/LC calls less reliable",
+            ))
+        if not loftee_sql:
+            missing_helpers.append((
+                "conservation_file",
+                "GERP conservation filter disabled — HC/LC calls less reliable",
+            ))
 
+        if missing_helpers:
+            detail = "\n  ".join(
+                f"- resources.{key} ({impact})" for key, impact in missing_helpers
+            )
+            logger.warning(
+                "LOFTEE is running in DEGRADED MODE — key helper files not configured.\n"
+                "  HC/LC LoF classifications may be less accurate.\n"
+                "  Missing (set in config/paths.yaml to enable full filtering):\n"
+                "  %s",
+                detail,
+            )
+
+        plugin_parts = ["LoF", f"loftee_path:{loftee_dir}"]
         if loftee_human:
             plugin_parts.append(f"human_ancestor_fa:{loftee_human}")
-        else:
-            logger.warning(
-                "LOFTEE: human_ancestor_fa not configured — ancestral allele filter "
-                "will be skipped. Set resources.loftee_human_ancestor_fa in "
-                "config/paths.yaml to enable."
-            )
-
         if loftee_sql:
             plugin_parts.append(f"conservation_file:{loftee_sql}")
-        else:
-            logger.warning(
-                "LOFTEE: conservation_file (loftee.sql) not configured — GERP "
-                "conservation filter will be skipped. Set resources.loftee_conservation_file "
-                "in config/paths.yaml to enable."
-            )
-
         if loftee_gerp_bw:
             plugin_parts.append(f"gerp_bigwig:{loftee_gerp_bw}")
-        else:
-            logger.info(
-                "LOFTEE: gerp_bigwig not configured — BigWig conservation filter "
-                "will be skipped. Set resources.loftee_gerp_bigwig in config/paths.yaml."
-            )
 
         args += ["--plugin", ",".join(plugin_parts)]
         logger.info(
@@ -450,26 +457,28 @@ def _resolve_timeout(settings: dict) -> Optional[int]:
 
 def _output_is_complete(output_vcf: str) -> bool:
     """
-    Return True if output_vcf already exists and contains a VEP CSQ header.
+    Return True if output_vcf exists, has a VEP CSQ header, AND contains at
+    least one data record.
 
-    Used to implement skip_if_annotated_exists: the file must not only exist
-    but also have a valid CSQ annotation line so a partial/truncated output
-    from a previous failed run is not mistakenly accepted.
+    A file with only headers is incomplete — VEP can crash after writing the
+    header block but before flushing any annotated variant records.  Requiring
+    at least one data record prevents silently reusing such a truncated file.
     """
     if not Path(output_vcf).exists():
         return False
     try:
         lower = output_vcf.lower()
         open_fn = gzip.open if lower.endswith((".gz", ".bgz")) else open
+        has_csq = False
         with open_fn(output_vcf, "rt", encoding="utf-8", errors="replace") as fh:
             for line in fh:
-                if not line.startswith("##"):
-                    break
                 if line.startswith("##INFO=<ID=CSQ"):
-                    return True
+                    has_csq = True
+                elif not line.startswith("#"):
+                    return has_csq  # data record found — complete iff CSQ header present
+        return False  # no data records found
     except Exception:
-        pass
-    return False
+        return False
 
 
 def run_vep(command: List[str], output_vcf: str, settings: Optional[dict] = None) -> str:

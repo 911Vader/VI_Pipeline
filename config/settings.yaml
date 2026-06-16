@@ -199,6 +199,14 @@ deepvariant:
   markdup_timeout_hours: 0
 
 # ---------------------------------------------------------------------------
+# bcftools settings
+# ---------------------------------------------------------------------------
+bcftools:
+  # Hard timeout for bcftools norm (hours). 0 = no limit (default — recommended
+  # for large WGS VCFs which can take longer than any fixed estimate).
+  norm_timeout_hours: 0
+
+# ---------------------------------------------------------------------------
 # Reviewer flag thresholds
 # Used by analysis/reviewer_flags.py to annotate reviewer-facing flags.
 # These do NOT affect ACMG classification.

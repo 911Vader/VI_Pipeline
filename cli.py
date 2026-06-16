@@ -229,7 +229,7 @@ def main() -> int:
                     log.info("Multi-allelic records detected — normalizing with bcftools norm")
                     prog.next("Normalising VCF")
                     norm_vcf = str(out_dir / f"{sample_id}.norm.vcf")
-                    vcf_for_annotation = normalize_vcf(args.input, norm_vcf, paths_config, threads=int(settings.get("vep", {}).get("fork", 4)))
+                    vcf_for_annotation = normalize_vcf(args.input, norm_vcf, paths_config, threads=int(settings.get("vep", {}).get("fork", 4)), settings=settings)
                     run_log.add_output_file("normalized_vcf", vcf_for_annotation)
                     run_log.add_step("normalize_vcf", "completed",
                                      detail=f"Normalized VCF: {vcf_for_annotation}")
@@ -291,7 +291,7 @@ def main() -> int:
                 prog.expand()   # total becomes 9
                 prog.next("Normalising VCF")
                 norm_vcf = str(out_dir / f"{sample_id}.norm.vcf")
-                vcf_for_annotation = normalize_vcf(raw_vcf, norm_vcf, paths_config, threads=int(settings.get("vep", {}).get("fork", 4)))
+                vcf_for_annotation = normalize_vcf(raw_vcf, norm_vcf, paths_config, threads=int(settings.get("vep", {}).get("fork", 4)), settings=settings)
                 run_log.add_output_file("normalized_vcf", vcf_for_annotation)
                 run_log.add_step("normalize_vcf", "completed",
                                  detail=f"Normalized VCF: {vcf_for_annotation}")
@@ -344,7 +344,7 @@ def main() -> int:
                 prog.expand()   # total becomes 3 + _TAIL
                 prog.next("Normalising VCF")
                 norm_vcf = str(out_dir / f"{sample_id}.norm.vcf")
-                vcf_for_annotation = normalize_vcf(raw_vcf, norm_vcf, paths_config, threads=int(settings.get("vep", {}).get("fork", 4)))
+                vcf_for_annotation = normalize_vcf(raw_vcf, norm_vcf, paths_config, threads=int(settings.get("vep", {}).get("fork", 4)), settings=settings)
                 run_log.add_output_file("normalized_vcf", vcf_for_annotation)
                 run_log.add_step("normalize_vcf", "completed",
                                  detail=f"Normalized VCF: {vcf_for_annotation}")

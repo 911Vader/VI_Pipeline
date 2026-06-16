@@ -21,6 +21,7 @@ from typing import List, Optional
 
 from analysis.parser import Variant
 from analysis.acmg.evidence_codes import PATHOGENIC, LIKELY_PATHOGENIC, VUS
+from reporting import PIPELINE_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,7 @@ def _write_info_sheet(ws, metadata, n_retained, n_excluded,
 
     rows = [
         ("VI_Pipeline Report", ""),
+        ("Pipeline Version",   PIPELINE_VERSION),
         ("", ""),
         ("MANDATORY DISCLAIMER", MANDATORY_DISCLAIMER),
         ("", ""),

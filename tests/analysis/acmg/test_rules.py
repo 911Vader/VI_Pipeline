@@ -388,8 +388,19 @@ class TestEvalPP3:
         assert eval_PP3(v, SETTINGS) is False
 
     def test_intragroup_conflict_cancels_group1_vote(self):
-        """CADD damaging + REVEL below-pathogenic → conflict inside Group 1 → vote cancels."""
+        """CADD damaging + REVEL clearly benign (≤ revel_benign) → conflict cancels Group 1 vote."""
         v = _make_variant(cadd_phred=30, revel_score=0.10)
+        assert eval_PP3(v, SETTINGS) is False
+
+    def test_revel_gray_zone_does_not_cancel_cadd_damaging_vote(self):
+        """CADD damaging + REVEL gray zone (0.15 < score < 0.75) → REVEL is neutral, not conflicting.
+        Group 1 still votes damaging. Combined with SpliceAI, PP3 fires."""
+        v = _make_variant(cadd_phred=30, revel_score=0.50, spliceai_max_score=0.6)
+        assert eval_PP3(v, SETTINGS) is True
+
+    def test_revel_gray_zone_alone_insufficient(self):
+        """CADD damaging + REVEL gray zone, no other group → still only 1 group voting → no PP3."""
+        v = _make_variant(cadd_phred=30, revel_score=0.50)
         assert eval_PP3(v, SETTINGS) is False
 
     def test_two_tools_both_below_threshold_does_not_trigger(self):

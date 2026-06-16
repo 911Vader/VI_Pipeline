@@ -289,8 +289,10 @@ def eval_PP3(variant: Variant, settings: dict) -> bool:
     if variant.revel_score is not None:
         if variant.revel_score >= t["revel_pathogenic"]:
             g1_dam = True
-        else:
+        elif variant.revel_score <= t["revel_benign"]:
             g1_ben = True
+        # Gray zone (revel_benign < score < revel_pathogenic): no signal
+        # A neutral REVEL score must not cancel a CADD damaging vote.
     # Intra-group conflict cancels the vote
     group1_damaging = g1_dam and not g1_ben
 

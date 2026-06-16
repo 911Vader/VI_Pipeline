@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from analysis.parser import Variant
+from reporting import PIPELINE_VERSION
 from reporting.spreadsheet import VARIANT_COLUMNS
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ def write_tsv(
     out.parent.mkdir(parents=True, exist_ok=True)
 
     with open(out, "w", newline="", encoding="utf-8") as fh:
+        fh.write(f"# VI_Pipeline {PIPELINE_VERSION}\n")
         # Mandatory disclaimer as a comment line
         fh.write(f"# {MANDATORY_DISCLAIMER}\n")
 

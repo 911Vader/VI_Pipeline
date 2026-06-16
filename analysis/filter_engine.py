@@ -120,6 +120,13 @@ def apply_filters(
             variant.excluded = True
             variant.exclusion_reason = excl_reason
             n_excluded += 1
+            variant.decision_trace["filter"] = {
+                "outcome": "excluded",
+                "reason": excl_reason,
+                "consequence_tier": _get_consequence_tier(variant.consequence, tier_config),
+                "gnomad_af_used": variant.gnomad_af,
+                "in_gene_list": variant.in_gene_list,
+            }
             continue
 
         # Soft deprioritizations — retained but ranked lower / shown separately
@@ -130,8 +137,18 @@ def apply_filters(
             variant.deprioritized = True
             variant.deprioritization_reason = deprio_reason
             n_deprioritized += 1
+            outcome = "deprioritized"
         else:
             n_retained += 1
+            outcome = "retained"
+
+        variant.decision_trace["filter"] = {
+            "outcome": outcome,
+            "reason": deprio_reason,
+            "consequence_tier": _get_consequence_tier(variant.consequence, tier_config),
+            "gnomad_af_used": variant.gnomad_af,
+            "in_gene_list": variant.in_gene_list,
+        }
 
     logger.info(
         "Filtering complete: %d retained, %d deprioritized, %d excluded (total %d)",
@@ -245,14 +262,24 @@ def _check_clinvar_deprioritize(
     """Deprioritize (not exclude) variants with ClinVar benign/likely-benign significance."""
     if not variant.clinvar_significance:
         return None
-    sig_norm = variant.clinvar_significance.lower().replace("_", " ")
-    for sig in exclude_sigs:
-        if sig in sig_norm:
-            return (
-                f"ClinVar significance {variant.clinvar_significance!r} indicates benign; "
-                f"deprioritized but retained for traceability"
-            )
+    # ClinVar CLNSIG can be slash-separated (e.g. "Benign/Likely_benign").
+    # Normalize each component and use exact set membership — substring matching
+    # would false-positive on values like "not_provided" containing a listed term.
+    components = {
+        part.strip().lower().replace("_", " ")
+        for part in variant.clinvar_significance.replace(",", "/").split("/")
+        if part.strip()
+    }
+    if components & exclude_sigs:
+        return (
+            f"ClinVar significance {variant.clinvar_significance!r} indicates benign; "
+            f"deprioritized but retained for traceability"
+        )
     return None
+
+
+# Alias preserved for backward compatibility with any existing test imports.
+_check_clinvar_filter = _check_clinvar_deprioritize
 
 
 # ---------------------------------------------------------------------------
@@ -322,17 +349,19 @@ def _is_clinvar_pathogenic(clinvar_significance: Optional[str]) -> bool:
 # Reporting helper
 # ---------------------------------------------------------------------------
 
-def get_filter_summary(variants: List[Variant]) -> dict:
+def get_filter_summary(variants: List[Variant], top_excluded_n: int = 20) -> dict:
     """
     Return a summary dict of filtering outcomes.
 
     Useful for run-log reporting.  Exclusion reasons are bucketed by their
-    leading keyword for compact display.
+    leading keyword for compact display.  The top_excluded list makes the
+    first N excluded variants visible without requiring log inspection.
 
     Returns
     -------
-    dict with keys: total, retained, deprioritized, excluded, exclusion_reasons (dict of
-    bucketed-reason → count).
+    dict with keys: total, retained, deprioritized, excluded,
+    exclusion_reasons (bucketed-reason → count),
+    top_excluded (list of up to top_excluded_n excluded variant summaries).
     """
     excluded_list      = [v for v in variants if v.excluded]
     deprioritized_list = [v for v in variants if not v.excluded and v.deprioritized]
@@ -344,10 +373,22 @@ def get_filter_summary(variants: List[Variant]) -> dict:
         bucket = raw.split(";")[0].split(" ")[0].rstrip("=").strip()
         reason_counts[bucket] = reason_counts.get(bucket, 0) + 1
 
+    top_excluded = [
+        {
+            "variant":     f"{v.chrom}:{v.pos} {v.ref}>{v.alt}",
+            "gene":        v.gene_symbol or "",
+            "consequence": v.consequence or "",
+            "gnomad_af":   v.gnomad_af,
+            "reason":      v.exclusion_reason or "unknown",
+        }
+        for v in excluded_list[:top_excluded_n]
+    ]
+
     return {
         "total":             len(variants),
         "retained":          retained_count,
         "deprioritized":     len(deprioritized_list),
         "excluded":          len(excluded_list),
         "exclusion_reasons": reason_counts,
+        "top_excluded":      top_excluded,
     }

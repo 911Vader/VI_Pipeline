@@ -263,6 +263,14 @@ class Variant:
     deprioritized: bool = False
     deprioritization_reason: Optional[str] = None
 
+    # Audit trail: populated by filter_engine.py and classifier.py so every
+    # pipeline decision is traceable without reading raw logs.
+    decision_trace: dict = field(default_factory=dict)
+
+    # ACMG rules that threw an exception during evaluation (populated by classifier.py).
+    # An empty list means all rules completed normally (not that all returned False).
+    acmg_skipped_rules: List[str] = field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # Public entry point

@@ -10,6 +10,7 @@ Usage in cli.py:
 """
 
 import logging
+import subprocess
 from pathlib import Path
 
 from analysis.upstream.fastq_handler import (
@@ -17,6 +18,7 @@ from analysis.upstream.fastq_handler import (
     _get_reference_fasta,
     _require_tool,
     _run_deepvariant,
+    _run_flagstat,
     _run_samtools_index,
 )
 
@@ -26,6 +28,49 @@ _DV_SHARDS_DEFAULT  = 4
 _DV_VERSION_DEFAULT = "1.10.0"
 _DV_MODEL_DEFAULT   = "WGS"
 _DV_TIMEOUT_DEFAULT = 43200   # 12 h
+
+
+def _check_bam_sort_order(samtools_exe: str, bam_path: str) -> None:
+    """
+    Raise RuntimeError if the BAM is not coordinate-sorted.
+
+    Reads the @HD header line and inspects the SO (sort order) tag.
+    If the tag is absent or the header is missing, logs a warning rather
+    than failing — some valid BAMs omit @HD entirely.
+    """
+    result = subprocess.run(
+        [samtools_exe, "view", "-H", bam_path],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Could not read BAM header: {bam_path}\n"
+            f"  {result.stderr.strip()}"
+        )
+    for line in result.stdout.splitlines():
+        if not line.startswith("@HD"):
+            continue
+        fields = {
+            kv.split(":", 1)[0]: kv.split(":", 1)[1]
+            for kv in line.split("\t")[1:]
+            if ":" in kv
+        }
+        so = fields.get("SO", "").lower()
+        if so == "coordinate":
+            return
+        if so:
+            raise RuntimeError(
+                f"BAM is not coordinate-sorted (SO:{so}): {bam_path}\n"
+                f"  DeepVariant requires a coordinate-sorted BAM.\n"
+                f"  Sort with:  samtools sort -@ 8 -o sorted.bam {bam_path}"
+            )
+        logger.warning(
+            "BAM @HD header has no SO tag — cannot verify sort order: %s", bam_path,
+        )
+        return
+    logger.warning(
+        "BAM has no @HD header line — cannot verify sort order: %s", bam_path,
+    )
 
 
 def run_bam_to_vcf(
@@ -70,6 +115,10 @@ def run_bam_to_vcf(
         sample_id, version, dv_threads,
     )
 
+    # Validate sort order before DeepVariant — a name-sorted BAM produces a
+    # cryptic DV error with no hint about the real cause.
+    _check_bam_sort_order(samtools_exe, bam_path)
+
     # Create BAM index if neither <name>.bam.bai nor <name>.bai exists.
     bam = Path(bam_path)
     has_index = (bam.parent / (bam.name + ".bai")).exists() or \
@@ -77,6 +126,9 @@ def run_bam_to_vcf(
     if not has_index:
         logger.info("BAM index not found — creating with samtools index: %s", bam_path)
         _run_samtools_index(samtools_exe, bam_path)
+
+    # BAM QC before the expensive DeepVariant step.
+    _run_flagstat(samtools_exe, bam_path, str(out), sample_id)
 
     raw_vcf = _run_deepvariant(
         docker_exe=docker_exe,

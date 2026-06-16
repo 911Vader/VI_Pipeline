@@ -694,24 +694,46 @@ class TestOutputIsComplete:
         f.write_text("##fileformat=VCFv4.2\n##FILTER=<ID=PASS,Description=\"All filters passed\">\n")
         assert _output_is_complete(str(f)) is False
 
-    def test_returns_true_when_csq_header_present(self, tmp_path):
-        f = tmp_path / "annotated.vcf"
+    def test_returns_false_when_csq_header_but_no_records(self, tmp_path):
+        """CSQ header alone is not enough — VEP may crash before writing any records."""
+        f = tmp_path / "headers_only.vcf"
         f.write_text(
             "##fileformat=VCFv4.2\n"
             "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"VEP annotation\">\n"
         )
+        assert _output_is_complete(str(f)) is False
+
+    def test_returns_true_when_csq_header_and_data_record_present(self, tmp_path):
+        f = tmp_path / "annotated.vcf"
+        f.write_text(
+            "##fileformat=VCFv4.2\n"
+            "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"VEP annotation\">\n"
+            "chr1\t100\t.\tA\tT\t.\tPASS\tCSQ=foo\n"
+        )
         assert _output_is_complete(str(f)) is True
 
-    def test_returns_true_for_gzipped_csq_file(self, tmp_path):
+    def test_returns_true_for_gzipped_csq_file_with_records(self, tmp_path):
         import gzip as gz
         f = tmp_path / "annotated.vcf.gz"
         content = (
             "##fileformat=VCFv4.2\n"
             "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"VEP annotation\">\n"
+            "chr1\t100\t.\tA\tT\t.\tPASS\tCSQ=foo\n"
         )
         with gz.open(str(f), "wt") as fh:
             fh.write(content)
         assert _output_is_complete(str(f)) is True
+
+    def test_returns_false_for_gzipped_csq_header_only(self, tmp_path):
+        """Gzipped file with only headers (no records) must return False."""
+        import gzip as gz
+        f = tmp_path / "headers_only.vcf.gz"
+        with gz.open(str(f), "wt") as fh:
+            fh.write(
+                "##fileformat=VCFv4.2\n"
+                "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"VEP annotation\">\n"
+            )
+        assert _output_is_complete(str(f)) is False
 
     def test_returns_false_for_gzipped_without_csq(self, tmp_path):
         import gzip as gz
@@ -842,6 +864,7 @@ class TestAnnotateSkipIfComplete:
         path.write_text(
             "##fileformat=VCFv4.2\n"
             "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"VEP annotation\">\n"
+            "chr1\t100\t.\tA\tT\t.\tPASS\tCSQ=foo\n"
         )
 
     def test_skips_vep_when_output_complete_and_skip_enabled(self, tmp_path):

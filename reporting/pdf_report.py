@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from analysis.parser import Variant
+from reporting import PIPELINE_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +32,6 @@ MANDATORY_DISCLAIMER = (
     "Top genomic candidate(s) requiring expert review. "
     "Variant pathogenicity alone does not prove cause of death."
 )
-
-PIPELINE_VERSION = "1.0.0"
 
 
 # ---------------------------------------------------------------------------
