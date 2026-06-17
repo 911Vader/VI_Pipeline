@@ -104,6 +104,16 @@ def _build_parser() -> argparse.ArgumentParser:
              "Overrides --sample-id / --case-id if both supplied.",
     )
 
+    # --- DeepVariant options (FASTQ input only) ---
+    dv_group = parser.add_argument_group("DeepVariant (FASTQ input only)")
+    dv_group.add_argument(
+        "--disable-small-model",
+        action="store_true",
+        default=False,
+        help="Force DeepVariant to use the deep model for every candidate site. "
+             "Disables the small model optimisation. Only applies to FASTQ input.",
+    )
+
     # --- General ---
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging.")
     parser.add_argument("--version", action="version", version="VI_Pipeline 1.0.0")
@@ -143,6 +153,10 @@ def main() -> int:
     if settings_path.exists():
         with open(settings_path) as fh:
             settings = yaml.safe_load(fh) or {}
+
+    # CLI flags override settings.yaml values
+    if args.disable_small_model:
+        settings.setdefault("deepvariant", {})["disable_small_model"] = True
 
     # --- Resolve metadata ---
     metadata: dict = {

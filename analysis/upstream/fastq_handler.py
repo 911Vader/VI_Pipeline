@@ -56,6 +56,7 @@ _DV_IMAGE = "google/deepvariant"
 _DV_VERSION_DEFAULT = "1.10.0"
 _DV_MODEL_DEFAULT = "WGS"
 _DV_SHARDS_DEFAULT = 4
+_DV_USE_GPU_DEFAULT = "auto"
 
 
 # ---------------------------------------------------------------------------
@@ -753,6 +754,20 @@ def _run_flagstat(
     return {"total_reads": total, "mapped_reads": mapped}
 
 
+def _detect_gpu() -> bool:
+    """Return True if an NVIDIA GPU is present and accessible."""
+    if not shutil.which("nvidia-smi"):
+        return False
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except Exception:
+        return False
+
+
 def _run_deepvariant(
     docker_exe: str,
     fasta_path: str,
@@ -764,6 +779,8 @@ def _run_deepvariant(
     version: str,
     timeout: int,
     visual_report: bool = False,
+    use_gpu: bool = False,
+    disable_small_model: bool = False,
 ) -> str:
     """
     Call variants with DeepVariant running inside the official Docker image.
@@ -772,6 +789,10 @@ def _run_deepvariant(
       /workdir  <-- out_dir (rw): contains the sorted BAM; output VCF written here
       /ref      <-- fasta parent directory (ro): FASTA + .fai index
                     (omitted when fasta lives inside out_dir -- /workdir is used instead)
+
+    When use_gpu=True the GPU-enabled image tag (<version>-gpu) is used and
+    --gpus all is passed to Docker.  call_variants runs on the GPU; make_examples
+    is always CPU-only regardless.
 
     The output file on the host is:
       {out_dir}/{sample_id}.dv.vcf.gz  (bgzipped VCF)
@@ -813,11 +834,14 @@ def _run_deepvariant(
     # Run as the current user so output files are owned correctly.
     uid_gid = f"{os.getuid()}:{os.getgid()}"
 
+    image_tag = f"{version}-gpu" if use_gpu else version
+    gpu_args: List[str] = ["--gpus", "all"] if use_gpu else []
+
     cmd: List[str] = [
         docker_exe, "run", "--rm",
         "--user", uid_gid,
-    ] + vol_args + [
-        f"{_DV_IMAGE}:{version}",
+    ] + gpu_args + vol_args + [
+        f"{_DV_IMAGE}:{image_tag}",
         "/opt/deepvariant/bin/run_deepvariant",
         f"--model_type={model_type}",
         f"--ref={ref_in_container}",
@@ -827,13 +851,16 @@ def _run_deepvariant(
     ]
     if not visual_report:
         cmd.append("--novcf_stats_report")
+    if disable_small_model:
+        cmd.append("--disable_small_model")
 
     logger.info(
-        "DeepVariant variant calling:\n  %s",
+        "DeepVariant variant calling (%s):\n  %s",
+        "GPU" if use_gpu else "CPU",
         " ".join(shlex.quote(t) for t in cmd),
     )
     logger.info(
-        "DeepVariant is running -- this typically takes 1-8 hours for WGS. "
+        "DeepVariant is running -- this typically takes 1-8 hours for WGS (less with GPU). "
         "If the image is not cached locally, Docker will pull it first (~1 GB)."
     )
 
@@ -944,6 +971,15 @@ def run_fastq_to_vcf(
     model_type = str(dv_cfg.get("model_type", _DV_MODEL_DEFAULT))
     timeout_h  = float(dv_cfg.get("timeout_hours", _DV_TIMEOUT_DEFAULT / 3600))
     timeout    = int(timeout_h * 3600) if timeout_h > 0 else None
+
+    gpu_setting = str(dv_cfg.get("use_gpu", _DV_USE_GPU_DEFAULT)).lower()
+    if gpu_setting == "auto":
+        use_gpu = _detect_gpu()
+        logger.info("GPU auto-detection: %s", "GPU found — using GPU image" if use_gpu else "no GPU — using CPU")
+    else:
+        use_gpu = gpu_setting in ("true", "1", "yes")
+
+    disable_small_model = bool(dv_cfg.get("disable_small_model", False))
 
     # BWA-specific settings — bwa_threads defaults to dv_threads if not set separately.
     # bwa_timeout_hours: 0 = no timeout.
@@ -1102,6 +1138,8 @@ def run_fastq_to_vcf(
             version=version,
             timeout=timeout,
             visual_report=bool(dv_cfg.get("visual_report", False)),
+            use_gpu=use_gpu,
+            disable_small_model=disable_small_model,
         )
 
     logger.info(

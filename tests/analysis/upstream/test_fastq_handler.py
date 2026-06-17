@@ -30,6 +30,7 @@ from analysis.upstream.fastq_handler import (
     _run_bwa_align,
     _run_samtools_index,
     _run_deepvariant,
+    _detect_gpu,
 )
 
 
@@ -365,6 +366,87 @@ class TestRunDeepVariant:
         with pytest.raises(RuntimeError, match="settings.yaml"):
             self._call(tmp_path, raise_timeout=True)
 
+    def test_gpu_image_tag_and_flag_in_command(self, tmp_path):
+        """use_gpu=True selects the -gpu image tag and adds --gpus all."""
+        out_vcf = str(tmp_path / "SAMPLE.dv.vcf.gz")
+        Path(out_vcf).write_bytes(b"BGZF")
+        captured = []
+        with patch("subprocess.run",
+                   side_effect=lambda cmd, **kw: captured.append(cmd) or MagicMock(returncode=0, stderr="")):
+            _run_deepvariant(
+                "/usr/bin/docker", "/data/genome.fa", str(tmp_path / "SAMPLE.sorted.bam"),
+                str(tmp_path), "SAMPLE", 4, "WGS", "1.10.0", 0, use_gpu=True,
+            )
+        cmd = captured[0]
+        assert "--gpus" in cmd and "all" in cmd
+        assert any("1.10.0-gpu" in t for t in cmd)
+
+    def test_cpu_mode_no_gpu_flag(self, tmp_path):
+        """use_gpu=False uses the plain image tag and no --gpus flag."""
+        out_vcf = str(tmp_path / "SAMPLE.dv.vcf.gz")
+        Path(out_vcf).write_bytes(b"BGZF")
+        captured = []
+        with patch("subprocess.run",
+                   side_effect=lambda cmd, **kw: captured.append(cmd) or MagicMock(returncode=0, stderr="")):
+            _run_deepvariant(
+                "/usr/bin/docker", "/data/genome.fa", str(tmp_path / "SAMPLE.sorted.bam"),
+                str(tmp_path), "SAMPLE", 4, "WGS", "1.10.0", 0, use_gpu=False,
+            )
+        cmd = captured[0]
+        assert "--gpus" not in cmd
+        assert any("1.10.0-gpu" in t for t in cmd) is False
+
+    def test_disable_small_model_flag_in_command(self, tmp_path):
+        """disable_small_model=True adds --disable_small_model to the DV command."""
+        out_vcf = str(tmp_path / "SAMPLE.dv.vcf.gz")
+        Path(out_vcf).write_bytes(b"BGZF")
+        captured = []
+        with patch("subprocess.run",
+                   side_effect=lambda cmd, **kw: captured.append(cmd) or MagicMock(returncode=0, stderr="")):
+            _run_deepvariant(
+                "/usr/bin/docker", "/data/genome.fa", str(tmp_path / "SAMPLE.sorted.bam"),
+                str(tmp_path), "SAMPLE", 4, "WGS", "1.10.0", 0, disable_small_model=True,
+            )
+        assert "--disable_small_model" in captured[0]
+
+    def test_disable_small_model_false_omits_flag(self, tmp_path):
+        """disable_small_model=False (default) does not add --disable_small_model."""
+        out_vcf = str(tmp_path / "SAMPLE.dv.vcf.gz")
+        Path(out_vcf).write_bytes(b"BGZF")
+        captured = []
+        with patch("subprocess.run",
+                   side_effect=lambda cmd, **kw: captured.append(cmd) or MagicMock(returncode=0, stderr="")):
+            _run_deepvariant(
+                "/usr/bin/docker", "/data/genome.fa", str(tmp_path / "SAMPLE.sorted.bam"),
+                str(tmp_path), "SAMPLE", 4, "WGS", "1.10.0", 0,
+            )
+        assert "--disable_small_model" not in captured[0]
+
+
+# ---------------------------------------------------------------------------
+# _detect_gpu
+# ---------------------------------------------------------------------------
+
+class TestDetectGpu:
+    def test_returns_true_when_nvidia_smi_succeeds(self):
+        with patch("shutil.which", return_value="/usr/bin/nvidia-smi"), \
+             patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="NVIDIA RTX A6000\n")):
+            assert _detect_gpu() is True
+
+    def test_returns_false_when_nvidia_smi_not_found(self):
+        with patch("shutil.which", return_value=None):
+            assert _detect_gpu() is False
+
+    def test_returns_false_when_nvidia_smi_fails(self):
+        with patch("shutil.which", return_value="/usr/bin/nvidia-smi"), \
+             patch("subprocess.run", return_value=MagicMock(returncode=1, stdout="")):
+            assert _detect_gpu() is False
+
+    def test_returns_false_when_nvidia_smi_raises(self):
+        with patch("shutil.which", return_value="/usr/bin/nvidia-smi"), \
+             patch("subprocess.run", side_effect=Exception("timeout")):
+            assert _detect_gpu() is False
+
 
 # ---------------------------------------------------------------------------
 # run_fastq_to_vcf — full pipeline (all sub-steps mocked)
@@ -386,6 +468,7 @@ class TestRunFastqToVcf:
              patch("analysis.upstream.fastq_handler._run_bwa_align", return_value=sorted_bam), \
              patch("analysis.upstream.fastq_handler._run_samtools_index"), \
              patch("analysis.upstream.fastq_handler._run_markdup", return_value=sorted_bam), \
+             patch("analysis.upstream.fastq_handler._detect_gpu", return_value=False), \
              patch("analysis.upstream.fastq_handler._run_deepvariant", return_value=raw_vcf):
             return run_fastq_to_vcf(
                 fastq_r1="R1.fastq.gz",
@@ -471,6 +554,7 @@ class TestRunFastqToVcf:
              patch("analysis.upstream.fastq_handler._run_bwa_align", return_value=sorted_bam), \
              patch("analysis.upstream.fastq_handler._run_samtools_index"), \
              patch("analysis.upstream.fastq_handler._run_markdup", return_value=sorted_bam), \
+             patch("analysis.upstream.fastq_handler._detect_gpu", return_value=False), \
              patch("analysis.upstream.fastq_handler._run_deepvariant",
                    side_effect=RuntimeError("DeepVariant exited with code 1")):
             with pytest.raises(RuntimeError, match="DeepVariant"):
@@ -491,6 +575,7 @@ class TestRunFastqToVcf:
              patch("analysis.upstream.fastq_handler._run_bwa_align", return_value=sorted_bam_path), \
              patch("analysis.upstream.fastq_handler._run_samtools_index"), \
              patch("analysis.upstream.fastq_handler._run_markdup", return_value=sorted_bam_path), \
+             patch("analysis.upstream.fastq_handler._detect_gpu", return_value=False), \
              patch("analysis.upstream.fastq_handler._run_deepvariant", return_value=raw_vcf_path):
             run_fastq_to_vcf(
                 "R1.fastq.gz", None, "SAMPLE", new_dir,

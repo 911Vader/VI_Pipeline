@@ -372,10 +372,22 @@ class App(tb.Window):
             font=(_FONT_UI, _SZS), cursor="hand2",
         )
         skip_cb.grid(row=skip_row, column=0, columnspan=4,
-                     sticky="w", padx=_PAD, pady=(_PADS, _PAD))
+                     sticky="w", padx=_PAD, pady=(_PADS, 2))
+
+        self._disable_small_model_var = tk.BooleanVar(value=False)
+        dsm_cb = tk.Checkbutton(
+            content,
+            text="Deep model only  (FASTQ input: disable DeepVariant small model — forces full CNN on every site)",
+            variable=self._disable_small_model_var,
+            bg=_SURFACE, fg=_MUTED, selectcolor=_BG,
+            activebackground=_SURFACE, activeforeground=_TEXT,
+            font=(_FONT_UI, _SZS), cursor="hand2",
+        )
+        dsm_cb.grid(row=skip_row + 1, column=0, columnspan=4,
+                    sticky="w", padx=_PAD, pady=(2, _PAD))
 
         tk.Frame(content, bg=_SURFACE, height=4).grid(
-            row=skip_row + 1, column=0, columnspan=4)
+            row=skip_row + 2, column=0, columnspan=4)
 
         self._vars["input"].trace_add("write", self._on_input_changed)
         self._vars["input"].trace_add("write", self._on_form_changed)
@@ -1284,6 +1296,7 @@ class App(tb.Window):
         self._last_run_values = None
         self._last_run_out = ""
         self._skip_vep_var.set(False)
+        self._disable_small_model_var.set(False)
         self._resume_btn.configure(state="disabled")
 
         # Reset UI
@@ -1313,6 +1326,8 @@ class App(tb.Window):
             cmd += ["--case-id", values["case_id"].strip()]
         if values.get("input2", "").strip():
             cmd += ["--input2", values["input2"].strip()]
+        if self._disable_small_model_var and self._disable_small_model_var.get():
+            cmd.append("--disable-small-model")
         return cmd
 
     def _find_annotated_vcf(self, out_dir: str) -> str | None:

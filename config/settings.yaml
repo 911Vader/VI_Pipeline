@@ -187,6 +187,19 @@ deepvariant:
   # Hard timeout for BWA alignment (hours). Set to 0 to disable.
   bwa_timeout_hours: 0
 
+  # Use only the deep model — disables the small model optimisation.
+  # The small model quickly classifies easy reference sites; disabling it forces
+  # every candidate through the full CNN. Slightly higher accuracy on INDELs;
+  # slower call_variants step. Set to true to replicate a deep-model-only run.
+  disable_small_model: false
+
+  # GPU acceleration for DeepVariant call_variants step.
+  #   auto  — detect automatically via nvidia-smi (default)
+  #   true  — always use GPU (google/deepvariant:<version>-gpu image, --gpus all)
+  #   false — always use CPU
+  # make_examples always runs on CPU regardless of this setting.
+  use_gpu: auto
+
   # Generate the DeepVariant HTML QC report (.dv.visual_report.html).
   # Set to true to produce the report; false (default) suppresses it.
   visual_report: false
