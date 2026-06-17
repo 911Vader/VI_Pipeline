@@ -468,13 +468,13 @@ footer a{color:var(--cyan-bright)}
 
       <div class="step"><div class="dot">7</div>
         <div class="card"><div class="card-h"><h3>Variant calling</h3>
-          <span class="tool-chip v">DeepVariant 1.10.0</span><span class="tool-chip">WGS model · 192 shards</span></div>
+          <span class="tool-chip v">DeepVariant 1.10.0</span><span class="tool-chip">WGS model · 192 shards</span><span class="tool-chip">GPU-accelerated</span></div>
           <div class="card-b">
-            <p>Calls germline SNVs and small INDELs from the deduplicated BAM. DeepVariant is Google's deep-learning caller: instead of statistical models, it turns the read pileup at each candidate site into a three-channel image and classifies it with an Inception-v3 convolutional neural network trained on truth-labelled genomes. Runs from <span class="fname">google/deepvariant:1.10.0</span>.</p>
+            <p>Calls germline SNVs and small INDELs from the deduplicated BAM. DeepVariant is Google's deep-learning caller: instead of statistical models, it turns the read pileup at each candidate site into a three-channel image and classifies it with an Inception-v3 convolutional neural network trained on truth-labelled genomes. Runs from <span class="fname">google/deepvariant:1.10.0-gpu</span> when a GPU is available, <span class="fname">google/deepvariant:1.10.0</span> otherwise (auto-detected via <span class="fname">nvidia-smi</span>).</p>
             <div class="two">
               <div><div class="mini-h">Three internal phases</div><ul class="params">
-                <li><b>make_examples</b> — builds pileup tensors across 192 parallel shards · ~22 min</li>
-                <li><b>call_variants</b> — the CNN scores each tensor (hom-ref / het / hom-alt) · ~20 min</li>
+                <li><b>make_examples</b> — builds pileup tensors across 192 parallel shards · ~22 min (CPU only)</li>
+                <li><b>call_variants</b> — the CNN scores each tensor (hom-ref / het / hom-alt) · ~5–15 min on GPU, ~90 min on CPU</li>
                 <li><b>postprocess</b> — writes a bgzipped, tabix-indexed VCF · brief</li>
               </ul></div>
               <div><div class="mini-h">FILTER values</div><ul class="params">
@@ -483,7 +483,8 @@ footer a{color:var(--cyan-bright)}
                 <li><b>NoCall</b> — insufficient evidence</li>
               </ul></div>
             </div>
-            <div class="io"><div class="pill"><div class="lab">Out</div><div class="txt"><span class="fname">HG001.dv.vcf.gz</span> (121 MB) + <span class="fname">.tbi</span></div></div><div class="pill"><div class="lab">Run time</div><div class="txt">~45 minutes end-to-end on 192 cores</div></div></div>
+            <details class="why"><summary>GPU acceleration</summary><div class="inner">Only <b>call_variants</b> (neural network inference) runs on the GPU — <b>make_examples</b> is always CPU-only. The pipeline auto-detects an NVIDIA GPU via <span class="fname">nvidia-smi</span> and selects the <span class="fname">-gpu</span> Docker image automatically (<span class="fname">use_gpu: auto</span> in settings.yaml). This can be forced on or off with <span class="fname">use_gpu: true</span> or <span class="fname">false</span>. On this server (RTX A6000, 48 GB VRAM), call_variants drops from ~90 minutes to ~5–15 minutes.</div></details>
+            <div class="io"><div class="pill"><div class="lab">Out</div><div class="txt"><span class="fname">HG001.dv.vcf.gz</span> (121 MB) + <span class="fname">.tbi</span></div></div><div class="pill"><div class="lab">Run time</div><div class="txt">~45 min with GPU · ~2.5 hrs CPU-only</div></div></div>
           </div></div>
       </div>
 
@@ -869,7 +870,7 @@ footer a{color:var(--cyan-bright)}
           <tr><td>FASTQ sync</td><td>—</td><td class="num">44 + 45 GB</td></tr>
           <tr><td>BWA align + sort</td><td class="num">3.5 hrs</td><td class="num">107 GB BAM</td></tr>
           <tr><td>fixmate + markdup</td><td class="num">30 min</td><td class="num">106 GB BAM</td></tr>
-          <tr><td>DeepVariant 1.10.0</td><td class="num">45 min</td><td class="num">121 MB VCF</td></tr>
+          <tr><td>DeepVariant 1.10.0</td><td class="num">~45 min (GPU) · ~2.5 hrs (CPU)</td><td class="num">121 MB VCF</td></tr>
           <tr><td>bcftools norm</td><td>minutes</td><td class="num">626 MB</td></tr>
           <tr><td>VEP annotation</td><td class="num">~2 hrs</td><td class="num">13 GB</td></tr>
           <tr><td>Parse + filter</td><td class="num">14 min</td><td class="num">319,728 kept</td></tr>
@@ -951,6 +952,8 @@ footer a{color:var(--cyan-bright)}
         <p>DeepVariant instead turns each candidate pileup into a three-channel "image" (encoding reference bases, read bases, and supporting quality) and feeds it to a convolutional neural network trained on thousands of truth-labelled genomes. The CNN classifies each site as 0/0 (hom-ref), 0/1 (het) or 1/1 (hom-alt). It learns the visual signatures of true variants versus artefacts, generalising to edge cases — strand bias, low complexity, repeats — that break statistical models.</p>
         <h4>The three phases &amp; the FILTER values</h4>
         <p><b>make_examples</b> builds the pileup images (massively parallel, 192 shards), <b>call_variants</b> runs the CNN, <b>postprocess_variants</b> writes the VCF. Each call is then <span class="fname">PASS</span> (confident variant), <span class="fname">RefCall</span> (confident reference), or <span class="fname">NoCall</span> (ambiguous).</p>
+        <h4>GPU acceleration</h4>
+        <p><b>make_examples</b> is CPU-only by design — it reads the BAM and builds tensor images, a task that parallelises well across many cores but has no GPU path. <b>call_variants</b>, however, is pure neural network inference: batches of pileup images fed through a convolutional network. This is exactly what GPUs are built for. The pipeline detects an available NVIDIA GPU via <span class="fname">nvidia-smi</span> and automatically selects the <span class="fname">google/deepvariant:1.10.0-gpu</span> Docker image with <span class="fname">--gpus all</span>. On this server (RTX A6000, 48 GB VRAM), call_variants completes in ~5–15 minutes instead of ~90 minutes — a 10–20× speedup for that step. Total end-to-end time drops from ~2.5 hours to ~45 minutes. The setting <span class="fname">use_gpu</span> in <span class="fname">settings.yaml</span> accepts <span class="fname">auto</span> (default), <span class="fname">true</span>, or <span class="fname">false</span>.</p>
       </div>
     </details>
 
