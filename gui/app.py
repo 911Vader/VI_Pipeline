@@ -467,9 +467,10 @@ class App(tb.Window):
                  anchor="w").grid(row=0, column=1, sticky="w")
 
         self._elapsed_var = tk.StringVar()
-        tk.Label(status_row, textvariable=self._elapsed_var,
-                 bg=_BG, fg=_MUTED, font=(_FONT_MONO, _SZ),
-                 anchor="e").grid(row=0, column=2, sticky="e")
+        self._elapsed_lbl = tk.Label(
+            status_row, textvariable=self._elapsed_var,
+            bg=_BG, fg=_MUTED, font=(_FONT_MONO, _SZ), anchor="e")
+        self._elapsed_lbl.grid(row=0, column=2, sticky="e")
 
         # ── 7-dot stepper
         self._stepper_canvas = tk.Canvas(
@@ -730,6 +731,8 @@ class App(tb.Window):
         rare_vcf     — path to the input VCF (rare_annotated.1pc.vcf.gz)
         subsets_dir  — directory where the output .vcf.gz will be written
         """
+        import atexit as _atexit
+        import os as _os
         import tempfile as _tempfile
 
         out_name = self._fvars["outname"].get().strip() or "customized"
@@ -789,6 +792,7 @@ class App(tb.Window):
                     tf.write(ln.strip().upper() + "\n")
             tf.close()
             _tmp_gene = tf.name
+            _atexit.register(_os.unlink, _tmp_gene)
             _add("", f"SYMBOL=@{_tmp_gene}")
 
         if self._fvars["clinvar_en"].get():
@@ -1029,12 +1033,13 @@ class App(tb.Window):
             self._vars["input2"].set("")
 
     def _on_form_changed(self, *_) -> None:
-        """Enable Resume whenever the form has enough content and no run is active."""
+        """Enable Resume only when there is a previous run to resume and no run is active."""
         if self._running:
             return
         has_input = bool(self._vars["input"].get().strip())
         has_id    = bool(self._vars["sample_id"].get().strip())
-        state = "normal" if (has_input and has_id) else "disabled"
+        has_prev  = self._last_run_values is not None
+        state = "normal" if (has_input and has_id and has_prev) else "disabled"
         self._resume_btn.configure(state=state)
 
     # ── File browsing ─────────────────────────────────────────────────────────
@@ -1150,6 +1155,7 @@ class App(tb.Window):
         self._step_current = 0
         self._stage_var.set("")
         self._elapsed_var.set("")
+        self._elapsed_lbl.configure(fg=_MUTED)
         self._set_status(status_msg, running=True)
         self._draw_stepper()
         self._start_timer()
@@ -1271,12 +1277,15 @@ class App(tb.Window):
                 parent=self,
             )
             return
-        if not messagebox.askyesno(
-            "New Run",
-            "Clear all fields and the log to start a fresh analysis?",
-            parent=self,
-        ):
-            return
+        log_empty = not self._log.get("1.0", tk.END).strip()
+        form_empty = not any(v.get().strip() for v in self._vars.values())
+        if not (log_empty and form_empty):
+            if not messagebox.askyesno(
+                "New Run",
+                "Clear all fields and the log to start a fresh analysis?",
+                parent=self,
+            ):
+                return
 
         # Clear all input fields
         for var in self._vars.values():
@@ -1306,6 +1315,7 @@ class App(tb.Window):
         self._step_total = 0
         self._stage_var.set("")
         self._elapsed_var.set("")
+        self._elapsed_lbl.configure(fg=_MUTED)
         self._status_var.set("")
         self._stop_timer()
         self._pulse_stop()
@@ -1351,17 +1361,18 @@ class App(tb.Window):
         """
         # 1. Current output dir (set after a pipeline run in this session)
         if self._output_dir:
-            candidate = Path(self._output_dir) / "rare_annotated.1pc.vcf.gz"
+            candidate = Path(self._output_dir) / "vep_filter" / "rare_annotated.1pc.vcf.gz"
             if candidate.exists():
                 return str(candidate)
 
-        # 2. Parent directory of whatever the user has in the Sample file field
+        # 2. Run output dir inferred from input file's parent, checking vep_filter/ first
         input_path = self._vars["input"].get().strip()
         if input_path:
             parent = Path(input_path).parent
-            candidate = parent / "rare_annotated.1pc.vcf.gz"
-            if candidate.exists():
-                return str(candidate)
+            for subdir in ("vep_filter", ""):
+                candidate = parent / subdir / "rare_annotated.1pc.vcf.gz" if subdir else parent / "rare_annotated.1pc.vcf.gz"
+                if candidate.exists():
+                    return str(candidate)
 
             # 3. The input file itself if it's a VCF
             p = Path(input_path)
@@ -1438,6 +1449,7 @@ class App(tb.Window):
             self._stop_btn.configure(state="disabled")
             if self._last_run_values:
                 self._resume_btn.configure(state="normal")
+            self._elapsed_lbl.configure(fg=_DANGER)
             self._log_line(
                 f"Something went wrong (exit code {returncode}). Check the log above.",
                 tag="error")
@@ -1477,14 +1489,14 @@ class App(tb.Window):
         # ── All done
         self._run_btn.configure(state="normal")
         self._stop_btn.configure(state="disabled")
+        self._resume_btn.configure(state="disabled")
         self._progress_var.set(100)
         self._step_current = _STEPS
         self._stage_var.set("")
+        self._elapsed_lbl.configure(fg=_SUCCESS)
         self._draw_stepper()
         self._log_line("✓  Analysis complete.", tag="ok")
         self._set_status("✓  Analysis complete", done=True)
-        self._elapsed_var.set(
-            self._elapsed_var.get())   # keep elapsed shown
 
     # ── Log helpers ───────────────────────────────────────────────────────────
 

@@ -302,4 +302,4 @@ class ConcordanceEngine:
 
 def _normalise_chrom(chrom: str) -> str:
     """Strip leading 'chr' for consistent matching."""
-    return chrom.lower().lstrip("chr") if chrom else chrom
+    return chrom.lower().removeprefix("chr") if chrom else chrom

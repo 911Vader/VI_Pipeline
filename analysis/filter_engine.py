@@ -94,9 +94,6 @@ def apply_filters(
     filter_cfg       = settings.get("filtering", {})
     require_pass     = bool(filter_cfg.get("require_pass", True))
     max_af           = float(filter_cfg.get("max_af", 0.01))
-    ba1_threshold    = float(
-        settings.get("acmg", {}).get("ba1_af_threshold", 0.05)
-    )
     tier_config      = filter_cfg.get("consequence_tiers", {})
     exclude_sigs_raw: List[str] = filter_cfg.get("exclude_clinvar_significances", [])
     exclude_sigs: Set[str] = {s.lower().replace("_", " ") for s in exclude_sigs_raw}

@@ -37,6 +37,7 @@ import gzip
 import logging
 import os
 import re
+import threading
 import shlex
 import shutil
 import subprocess
@@ -575,6 +576,14 @@ def _run_bwa_align(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
+            # Drain BWA stderr in a background thread so the OS pipe buffer
+            # never fills and deadlocks bwa_proc.wait() on long runs.
+            _bwa_stderr_buf: list = []
+            _stderr_thread = threading.Thread(
+                target=lambda: _bwa_stderr_buf.append(bwa_proc.stderr.read()),
+                daemon=True,
+            )
+            _stderr_thread.start()
             fixmate_proc = subprocess.Popen(
                 fixmate_cmd,
                 stdin=bwa_proc.stdout,
@@ -592,7 +601,8 @@ def _run_bwa_align(
             fixmate_proc.stdout.close()
             fixmate_proc.wait(timeout=30)
             bwa_proc.wait(timeout=30)
-            bwa_stderr = bwa_proc.stderr.read().decode("utf-8", errors="replace")
+            _stderr_thread.join()
+            bwa_stderr = _bwa_stderr_buf[0].decode("utf-8", errors="replace") if _bwa_stderr_buf else ""
             bwa_returncode = bwa_proc.returncode
     except FileNotFoundError as exc:
         raise RuntimeError(
@@ -664,7 +674,7 @@ def _vcf_has_records(vcf_path: str) -> bool:
         return False
 
 
-def _run_samtools_index(samtools_exe: str, bam_path: str, threads: int = 192) -> None:
+def _run_samtools_index(samtools_exe: str, bam_path: str, threads: int = min(os.cpu_count() or 8, 8)) -> None:
     """Index a sorted BAM with samtools index."""
     cmd = [samtools_exe, "index", "-@", str(threads), bam_path]
     logger.info("Indexing BAM: %s", bam_path)

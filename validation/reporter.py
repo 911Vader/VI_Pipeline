@@ -280,9 +280,9 @@ def write_discordance_xlsx(
     col_widths = [
         20, 10, 28, 16, 16, 22, 22,
         14, 10, 10, 10, 10, 10, 10, 10, 10,
-        20, 20, 10, 8, 8, 12, 16,
-        18, 50, 50, 40,
+        30, 30, 50,
     ]
+    assert len(col_widths) == len(_DISCORD_COLUMNS)
     for col_idx, width in enumerate(col_widths, start=1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = width
 

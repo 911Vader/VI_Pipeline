@@ -427,7 +427,7 @@ def main() -> int:
         prog.next("Filtering variants")
         from analysis.filter_engine import apply_filters
         variants = apply_filters(variants, settings, gene_list=gene_list)
-        n_retained = sum(1 for v in variants if not v.excluded)
+        n_retained = sum(1 for v in variants if not v.excluded and not v.deprioritized)
         n_excluded = sum(1 for v in variants if v.excluded)
         run_log.add_step("filter", "completed",
                          detail=f"{n_retained} retained, {n_excluded} excluded")
