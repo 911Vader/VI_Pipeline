@@ -133,5 +133,5 @@ class TestCheckTool:
         ):
             results = check_all_tools()
         expected_keys = {"docker", "conda", "python", "nextflow", "vep",
-                         "bcftools", "bgzip", "tabix"}
+                         "bcftools", "bgzip", "tabix", "minibwa", "samtools"}
         assert set(results.keys()) == expected_keys

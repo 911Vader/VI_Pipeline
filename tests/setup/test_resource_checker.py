@@ -233,10 +233,10 @@ class TestBwaIndexPrefixResource:
         result = check_resource("bwa_index_prefix", prefix)
         assert any(".amb" in m for m in result.messages)
 
-    def test_missing_error_contains_bwa_index_command(self, tmp_path):
+    def test_missing_error_redirects_to_minibwa(self, tmp_path):
         prefix = str(tmp_path / "genome.fa")
         result = check_resource("bwa_index_prefix", prefix)
-        assert any("bwa index" in m for m in result.messages)
+        assert any("minibwa_index_prefix" in m for m in result.messages)
 
     # --- Placeholder / too-small .bwt ---
 
