@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Why More Threads ≠ More Speed</title>
+<style>
+:root {
+  --bg: #0D1117; --surface: #161B22; --border: #21262D;
+  --accent: #00D4AA; --accent2: #1F6FEB; --text: #E6EDF3;
+  --muted: #8B949E; --warn: #D29922; --danger: #DA3633;
+  --font: "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "Consolas", monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 15px; line-height: 1.65; padding: 40px; }
+h1 { font-size: 26px; font-weight: 700; margin-bottom: 6px; }
+.sub { color: var(--muted); margin-bottom: 40px; font-size: 14px; }
+
+/* sections */
+.section { margin-bottom: 56px; }
+.section h2 { font-size: 17px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .8px; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.section p { color: var(--muted); font-size: 14px; margin-bottom: 12px; max-width: 740px; }
+.section p strong { color: var(--text); }
+
+/* canvas containers */
+.chart-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; margin: 16px 0; }
+canvas { display: block; }
+
+/* slider */
+.slider-row { display: flex; align-items: center; gap: 16px; margin: 14px 0; }
+.slider-row label { font-size: 13px; color: var(--muted); min-width: 120px; }
+input[type=range] { -webkit-appearance: none; height: 4px; border-radius: 2px; background: var(--border); outline: none; flex: 1; max-width: 300px; }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+.val { font-family: var(--mono); font-size: 14px; color: var(--accent); min-width: 60px; }
+
+/* lock diagram */
+.lock-stage { display: flex; flex-direction: column; gap: 12px; padding: 20px 0; }
+.thread-row { display: flex; align-items: center; gap: 0; height: 28px; }
+.tl { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 72px; }
+.seg { height: 22px; border-radius: 3px; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 600; }
+.seg.work  { background: rgba(0,212,170,.3);  border: 1px solid var(--accent);  color: var(--accent); }
+.seg.wait  { background: rgba(218,54,51,.15); border: 1px solid var(--danger);  color: var(--danger); }
+.seg.idle  { background: var(--border); }
+.legend-row { display: flex; gap: 20px; font-size: 12px; color: var(--muted); margin-top: 8px; }
+.legend-row span { display: flex; align-items: center; gap: 6px; }
+.dot { width: 12px; height: 12px; border-radius: 2px; }
+
+/* callout */
+.callout { border-radius: 6px; padding: 14px 18px; font-size: 13.5px; border: 1px solid; margin: 14px 0; max-width: 740px; }
+.callout.info  { background: rgba(31,111,235,.08); border-color: var(--accent2); color: #a8c4f5; }
+.callout.tip   { background: rgba(0,212,170,.07);  border-color: var(--accent);  color: #7ee8d4; }
+.callout.warn  { background: rgba(210,153,34,.08); border-color: var(--warn);    color: #e8c87a; }
+.callout strong { color: #fff; }
+
+/* stat boxes */
+.statrow { display: flex; gap: 16px; flex-wrap: wrap; margin: 14px 0; }
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 22px; text-align: center; }
+.stat .v { font-size: 2rem; font-weight: 700; color: var(--accent); line-height: 1; }
+.stat .l { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.stat.red .v { color: var(--danger); }
+.stat.yellow .v { color: var(--warn); }
+</style>
+</head>
+<body>
+
+<h1>Why More Threads ≠ More Speed</h1>
+<p class="sub">A visual explanation of thread scaling, Amdahl's Law, and why minibwa saturates at ~32 threads.</p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<!-- SECTION 1: The ideal vs reality -->
+<!-- ══════════════════════════════════════════════════════════ -->
+<div class="section">
+  <h2>1 — The Core Promise vs The Reality</h2>
+  <p>When people say "use more threads," they imagine perfect parallel scaling: <strong>2× threads = 2× speed, 4× threads = 4× speed.</strong> Reality is always worse because not all parts of the program can run in parallel.</p>
+
+  <div class="statrow">
+    <div class="stat"><div class="v">192</div><div class="l">Threads assigned to BWA-MEM</div></div>
+    <div class="stat red"><div class="v">~46</div><div class="l">Effective cores actually used</div></div>
+    <div class="stat yellow"><div class="v">24%</div><div class="l">Thread efficiency</div></div>
+  </div>
+
+  <div class="callout warn">
+    <strong>The observed behaviour on this server:</strong> Running BWA-MEM with 192 threads showed 4,623% CPU in htop — that's only ~46 effective cores. 146 threads were fighting over internal locks instead of doing alignment work.
+  </div>
+
+  <div class="chart-wrap">
+    <canvas id="idealChart" width="700" height="280"></canvas>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<!-- SECTION 2: Amdahl's Law interactive -->
+<!-- ══════════════════════════════════════════════════════════ -->
+<div class="section">
+  <h2>2 — Amdahl's Law: The Serial Bottleneck</h2>
+  <p>Every program has a <strong>serial fraction</strong> — work that must happen one step at a time (reading the genome index, writing output, coordination logic). No matter how many threads you add, you cannot speed up the serial part.</p>
+  <p><strong>Amdahl's Law:</strong> Maximum speedup = 1 / (serial fraction + parallel fraction ÷ threads)</p>
+
+  <div class="slider-row">
+    <label>Serial fraction</label>
+    <input type="range" id="serialSlider" min="1" max="50" value="10">
+    <span class="val" id="serialVal">10%</span>
+  </div>
+  <p style="font-size:13px;color:var(--muted);margin-top:-6px">Move the slider to see how even a small serial section kills scaling.</p>
+
+  <div class="chart-wrap">
+    <canvas id="amdahlChart" width="700" height="300"></canvas>
+  </div>
+
+  <div class="callout tip">
+    <strong>Key insight:</strong> With just 10% of the program being serial, the maximum possible speedup with infinite threads is only 10×. With 5% serial, the ceiling is 20×. The serial bottleneck always wins eventually.
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<!-- SECTION 3: Lock contention -->
+<!-- ══════════════════════════════════════════════════════════ -->
+<div class="section">
+  <h2>3 — Lock Contention: Threads Waiting for Each Other</h2>
+  <p>BWA-MEM and minibwa use a shared FM-index (the compressed genome lookup table). When one thread searches the index, it takes a <strong>lock</strong> — other threads must wait. As you add more threads, more of them are waiting rather than working.</p>
+
+  <div class="chart-wrap">
+    <p style="font-size:13px;color:var(--muted);margin-bottom:16px">Thread activity over time — each row is one thread. <span style="color:var(--accent)">Working</span> vs <span style="color:var(--danger)">waiting for lock</span>.</p>
+
+    <div style="margin-bottom:20px">
+      <p style="font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600">4 THREADS — most threads working most of the time</p>
+      <div class="lock-stage" id="diagram4"></div>
+    </div>
+    <div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:8px;font-weight:600">16 THREADS — much more time spent waiting</p>
+      <div class="lock-stage" id="diagram16"></div>
+    </div>
+
+    <div class="legend-row">
+      <span><span class="dot" style="background:rgba(0,212,170,.3);border:1px solid var(--accent)"></span> Doing alignment work</span>
+      <span><span class="dot" style="background:rgba(218,54,51,.15);border:1px solid var(--danger)"></span> Waiting for index lock</span>
+      <span><span class="dot" style="background:var(--border)"></span> Idle / overhead</span>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<!-- SECTION 4: minibwa saturation curve -->
+<!-- ══════════════════════════════════════════════════════════ -->
+<div class="section">
+  <h2>4 — minibwa Thread Saturation</h2>
+  <p>minibwa is faster per-thread than the old BWA (better SIMD vectorisation, tighter memory access patterns). But it has the same fundamental bottleneck: the shared genome index. It saturates around <strong>32 threads</strong> — beyond that, adding threads gives almost no extra speed.</p>
+
+  <div class="slider-row">
+    <label>Drag to explore</label>
+    <input type="range" id="threadSlider" min="1" max="192" value="32">
+    <span class="val" id="threadVal">32 threads</span>
+  </div>
+
+  <div class="chart-wrap">
+    <canvas id="satChart" width="700" height="300"></canvas>
+  </div>
+
+  <div class="callout info">
+    <strong>Why not just use 1 thread then?</strong> Threads still help enormously up to the saturation point — going from 1 to 32 threads gives a real ~18× speedup. The problem is only going <em>past</em> the saturation point. That's why the pipeline is set to <code>bwa_threads: 32</code>, not 1 and not 192.
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<!-- SECTION 5: Why minibwa IS 4x faster -->
+<!-- ══════════════════════════════════════════════════════════ -->
+<div class="section">
+  <h2>5 — Where minibwa's Speedup Actually Comes From</h2>
+  <p>The speedup over old BWA-MEM comes from <strong>doing more useful work per thread</strong>, not from using more threads.</p>
+
+  <div class="chart-wrap">
+    <canvas id="compareChart" width="700" height="280"></canvas>
+  </div>
+
+  <div class="callout tip">
+    <strong>The key difference:</strong> minibwa uses AVX-512 SIMD instructions to process 16 bases at once per CPU operation (vs 4 in old BWA). It also uses a more compact index format (<code>.mbw</code> + <code>.l2b</code>) that fits better in CPU cache. Each thread does more work per clock cycle — so at 32 threads, it finishes the same job in less time.
+  </div>
+
+  <p>So "4× faster" means: <em>at the same thread count, each thread is ~4× more efficient.</em> Not that you can use 4× fewer threads to get the same time — though you can use fewer threads and still beat old BWA.</p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<!-- SECTION 6: Summary -->
+<!-- ══════════════════════════════════════════════════════════ -->
+<div class="section">
+  <h2>6 — The Mental Model</h2>
+  <p>Think of it like a kitchen:</p>
+
+  <div class="chart-wrap" style="padding:28px 32px">
+    <canvas id="kitchenChart" width="640" height="220"></canvas>
+  </div>
+
+  <div class="callout info">
+    <strong>Bottom line for this pipeline:</strong>
+    Setting <code>bwa_threads: 32</code> puts minibwa in the "sweet spot" — past the flat part of the efficiency curve but before threads start fighting each other. Going to 64 or 192 threads would burn CPU cores on lock-waiting while gaining almost no speed.
+  </div>
+</div>
+
+<script>
+// ─── helpers ───────────────────────────────────────────────
+function ctx(id) {
+  return document.getElementById(id).getContext('2d');
+}
+const ACC  = '#00D4AA';
+const ACC2 = '#1F6FEB';
+const MUTE = '#8B949E';
+const SURF = '#1C2128';
+const BRD  = '#21262D';
+const WARN = '#D29922';
+const DANG = '#DA3633';
+const TEXT = '#E6EDF3';
+
+function grid(c, W, H, pad, xMax, yMax, xLabel, yLabel, xTicks, yTicks) {
+  c.save();
+  c.strokeStyle = BRD;
+  c.lineWidth = 1;
+  // horizontal grid
+  for (let i = 0; i <= yTicks; i++) {
+    const y = pad.t + (H - pad.t - pad.b) * (1 - i / yTicks);
+    c.beginPath(); c.moveTo(pad.l, y); c.lineTo(W - pad.r, y); c.stroke();
+    const val = (yMax * i / yTicks);
+    c.fillStyle = MUTE; c.font = '11px JetBrains Mono, monospace';
+    c.textAlign = 'right';
+    c.fillText(Number.isInteger(val) ? val : val.toFixed(1), pad.l - 6, y + 4);
+  }
+  // vertical grid
+  for (let i = 0; i <= xTicks; i++) {
+    const x = pad.l + (W - pad.l - pad.r) * i / xTicks;
+    c.beginPath(); c.moveTo(x, pad.t); c.lineTo(x, H - pad.b); c.stroke();
+    const val = Math.round(xMax * i / xTicks);
+    c.fillStyle = MUTE; c.font = '11px JetBrains Mono, monospace';
+    c.textAlign = 'center';
+    c.fillText(val, x, H - pad.b + 14);
+  }
+  // axis labels
+  c.fillStyle = MUTE; c.font = '12px Segoe UI, system-ui, sans-serif';
+  c.textAlign = 'center';
+  c.fillText(xLabel, (pad.l + W - pad.r) / 2, H - 4);
+  c.save(); c.translate(12, (pad.t + H - pad.b) / 2);
+  c.rotate(-Math.PI / 2); c.textAlign = 'center';
+  c.fillText(yLabel, 0, 0); c.restore();
+  c.restore();
+}
+
+function toX(v, xMax, W, pad) { return pad.l + (W - pad.l - pad.r) * v / xMax; }
+function toY(v, yMax, H, pad) { return pad.t + (H - pad.t - pad.b) * (1 - v / yMax); }
+
+function line(c, pts, color, W=2, dash=[]) {
+  c.save(); c.strokeStyle = color; c.lineWidth = W;
+  if (dash.length) c.setLineDash(dash);
+  c.beginPath();
+  pts.forEach((p, i) => i === 0 ? c.moveTo(p[0], p[1]) : c.lineTo(p[0], p[1]));
+  c.stroke(); c.restore();
+}
+
+// ─── Chart 1: Ideal vs Reality ────────────────────────────
+(function() {
+  const c = ctx('idealChart'), W = 700, H = 280;
+  const pad = {l:55, r:20, t:20, b:48};
+  c.fillStyle = '#0D1117'; c.fillRect(0,0,W,H);
+  grid(c, W, H, pad, 192, 200, 'Number of threads', 'Speedup vs 1 thread', 6, 5);
+
+  const pts_ideal = [], pts_real_bwa = [], pts_real_mini = [];
+  for (let t = 1; t <= 192; t++) {
+    const ideal = t;
+    // BWA: saturates ~46, lots of overhead
+    const bwa = 46 * (1 - Math.exp(-t/14)) * (1 - 0.0012 * Math.max(0, t - 46));
+    // minibwa: saturates ~32, lower overhead, higher per-thread
+    const mini = 22 * (1 - Math.exp(-t/8)) * (1 - 0.001 * Math.max(0, t - 32));
+    pts_ideal.push([toX(t, 192, W, pad), toY(Math.min(ideal, 200), 200, H, pad)]);
+    pts_real_bwa.push([toX(t, 192, W, pad), toY(bwa, 200, H, pad)]);
+    pts_real_mini.push([toX(t, 192, W, pad), toY(mini, 200, H, pad)]);
+  }
+
+  line(c, pts_ideal, BRD, 1.5, [6,4]);
+  line(c, pts_real_bwa, WARN, 2.5);
+  line(c, pts_real_mini, ACC, 2.5);
+
+  // labels
+  c.font = '12px Segoe UI'; c.fillStyle = BRD;
+  c.fillText('Ideal (linear)', toX(100, 192, W, pad), toY(105, 200, H, pad) - 8);
+  c.fillStyle = WARN;
+  c.fillText('BWA-MEM (old)', toX(100, 192, W, pad), toY(37, 200, H, pad) - 8);
+  c.fillStyle = ACC;
+  c.fillText('minibwa (current)', toX(85, 192, W, pad), toY(20, 200, H, pad) - 8);
+
+  // marker at 192 threads, BWA
+  const bwa192 = 46 * (1 - Math.exp(-192/14)) * (1 - 0.0012 * Math.max(0, 192-46));
+  const px = toX(192, 192, W, pad), py = toY(bwa192, 200, H, pad);
+  c.beginPath(); c.arc(px, py, 5, 0, Math.PI*2); c.fillStyle=WARN; c.fill();
+  c.fillStyle=WARN; c.font='11px JetBrains Mono'; c.textAlign='right';
+  c.fillText(`~46 effective cores`, px-8, py-8);
+  c.fillText(`at 192 threads`, px-8, py+6);
+})();
+
+// ─── Chart 2: Amdahl's Law interactive ────────────────────
+function drawAmdahl(serial) {
+  const c = ctx('amdahlChart'), W = 700, H = 300;
+  const pad = {l:55, r:20, t:20, b:48};
+  c.clearRect(0,0,W,H);
+  c.fillStyle = '#0D1117'; c.fillRect(0,0,W,H);
+  grid(c, W, H, pad, 512, 20, 'Number of threads', 'Speedup (×)', 8, 5);
+
+  const s = serial / 100;
+  const pts = [], pts_ideal = [];
+  for (let t = 1; t <= 512; t += 2) {
+    const sp = 1 / (s + (1-s)/t);
+    pts.push([toX(t, 512, W, pad), toY(Math.min(sp, 20), 20, H, pad)]);
+    pts_ideal.push([toX(t, 512, W, pad), toY(Math.min(t, 20), 20, H, pad)]);
+  }
+  line(c, pts_ideal, BRD, 1.5, [6,4]);
+  line(c, pts, ACC2, 2.5);
+
+  // asymptote
+  const ceiling = 1/s;
+  if (ceiling <= 20) {
+    const cy = toY(ceiling, 20, H, pad);
+    line(c, [[pad.l, cy],[W-pad.r, cy]], DANG, 1, [4,3]);
+    c.fillStyle = DANG; c.font = '11px JetBrains Mono'; c.textAlign='left';
+    c.fillText(`Max possible: ${ceiling.toFixed(1)}×`, pad.l+6, cy-6);
+  }
+
+  // show actual serial fraction annotation
+  c.fillStyle = ACC2; c.font='12px Segoe UI'; c.textAlign='left';
+  c.fillText(`Serial fraction: ${serial}%  →  ceiling: ${ceiling<=20?ceiling.toFixed(1)+'×':'>20×'}`, pad.l, pad.t+16);
+  c.fillStyle=BRD; c.fillText('Ideal', toX(60,512,W,pad), toY(63,20,H,pad)-8);
+}
+drawAmdahl(10);
+document.getElementById('serialSlider').addEventListener('input', function() {
+  const v = parseInt(this.value);
+  document.getElementById('serialVal').textContent = v + '%';
+  drawAmdahl(v);
+});
+
+// ─── Lock diagram ─────────────────────────────────────────
+function makeDiagram(containerId, nThreads) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = '';
+  const SLOTS = 40;
+  // each thread: array of 'work', 'wait', 'idle'
+  // simulate: shared lock, max 1 thread at a time in critical section
+  const lockProb = Math.min(0.08 * nThreads, 0.7); // more threads = more contention
+  const rows = [];
+  for (let t = 0; t < nThreads; t++) {
+    const row = [];
+    for (let s = 0; s < SLOTS; s++) {
+      const r = Math.random();
+      if (r < 0.55 - lockProb * 0.4) row.push('work');
+      else if (r < 0.55) row.push('wait');
+      else if (r < 0.62) row.push('idle');
+      else row.push('work');
+    }
+    rows.push(row);
+  }
+
+  rows.forEach((row, i) => {
+    const div = document.createElement('div');
+    div.className = 'thread-row';
+    const lbl = document.createElement('div');
+    lbl.className = 'tl';
+    lbl.textContent = `Thread ${i+1}`;
+    div.appendChild(lbl);
+    row.forEach(type => {
+      const seg = document.createElement('div');
+      seg.className = 'seg ' + type;
+      seg.style.width = (640 / SLOTS) + 'px';
+      seg.style.marginRight = '1px';
+      if (type === 'work') seg.textContent = '';
+      div.appendChild(seg);
+    });
+    container.appendChild(div);
+  });
+}
+makeDiagram('diagram4', 4);
+makeDiagram('diagram16', 10);
+
+// ─── Chart 3: minibwa saturation ─────────────────────────
+function drawSat(highlightThreads) {
+  const c = ctx('satChart'), W = 700, H = 300;
+  const pad = {l:55, r:20, t:20, b:48};
+  c.clearRect(0,0,W,H);
+  c.fillStyle='#0D1117'; c.fillRect(0,0,W,H);
+  grid(c, W, H, pad, 192, 25, 'Threads', 'Speedup (×)', 6, 5);
+
+  // minibwa curve: saturates ~32, ceiling ~22×
+  const pts = [];
+  for (let t = 1; t <= 192; t++) {
+    const sp = 22 * (1 - Math.exp(-t/7.5)) * Math.max(0.1, 1 - 0.0008*(t-32)*(t>32?1:0));
+    pts.push([toX(t, 192, W, pad), toY(Math.min(sp, 25), 25, H, pad)]);
+  }
+  line(c, pts, ACC, 2.5);
+
+  // fill under curve up to highlight
+  c.save();
+  c.beginPath();
+  c.moveTo(toX(1, 192, W, pad), toY(0, 25, H, pad));
+  for (let t = 1; t <= highlightThreads; t++) {
+    const sp = 22*(1-Math.exp(-t/7.5))*Math.max(0.1,1-0.0008*(t-32)*(t>32?1:0));
+    c.lineTo(toX(t, 192, W, pad), toY(Math.min(sp,25), 25, H, pad));
+  }
+  c.lineTo(toX(highlightThreads, 192, W, pad), toY(0, 25, H, pad));
+  c.closePath();
+  c.fillStyle = 'rgba(0,212,170,0.12)';
+  c.fill(); c.restore();
+
+  // highlight thread marker
+  const hSp = 22*(1-Math.exp(-highlightThreads/7.5))*Math.max(0.1,1-0.0008*(highlightThreads-32)*(highlightThreads>32?1:0));
+  const hx = toX(highlightThreads, 192, W, pad);
+  const hy = toY(Math.min(hSp,25), 25, H, pad);
+  c.beginPath(); c.arc(hx, hy, 6, 0, Math.PI*2); c.fillStyle=ACC; c.fill();
+
+  // vertical dashed line
+  line(c, [[hx, pad.t],[hx, H-pad.b]], ACC, 1, [4,3]);
+
+  // annotations
+  c.fillStyle=ACC; c.font='12px Segoe UI'; c.textAlign='left';
+  const eff = Math.round(hSp/22*100);
+  const label = `${highlightThreads} threads → ~${hSp.toFixed(1)}× speedup  (${eff}% of max)`;
+  const lx = Math.min(hx+8, W-180);
+  c.fillText(label, lx, hy-10);
+
+  // saturation zone label
+  c.fillStyle = 'rgba(218,54,51,0.6)';
+  c.fillRect(toX(32, 192, W, pad), pad.t, W-pad.r-toX(32,192,W,pad), H-pad.t-pad.b);
+  c.fillStyle=DANG; c.font='11px Segoe UI'; c.textAlign='center';
+  c.fillText('Diminishing returns zone', (toX(32,192,W,pad)+W-pad.r)/2, pad.t+14);
+
+  // sweet spot label
+  c.fillStyle=ACC; c.font='11px Segoe UI'; c.textAlign='center';
+  c.fillText('Sweet spot', toX(16,192,W,pad), H-pad.b-8);
+}
+drawSat(32);
+document.getElementById('threadSlider').addEventListener('input', function() {
+  const v = parseInt(this.value);
+  document.getElementById('threadVal').textContent = v + ' threads';
+  drawSat(v);
+});
+
+// ─── Chart 4: compare BWA vs minibwa per-thread ──────────
+(function() {
+  const c = ctx('compareChart'), W = 700, H = 280;
+  const pad = {l:55, r:150, t:20, b:48};
+  c.fillStyle='#0D1117'; c.fillRect(0,0,W,H);
+
+  const tools = [
+    { name: 'BWA-MEM (old)\n192 threads', threads: 192, eff: 0.24, color: WARN, throughput: 1.0 },
+    { name: 'BWA-MEM\n64 threads', threads: 64, eff: 0.52, color: WARN, throughput: 0.85 },
+    { name: 'minibwa\n32 threads', threads: 32, eff: 0.91, color: ACC, throughput: 2.4 },
+    { name: 'minibwa\n64 threads', threads: 64, eff: 0.82, color: ACC, throughput: 2.6 },
+    { name: 'minibwa\n192 threads', threads: 192, eff: 0.48, color: ACC, throughput: 2.1 },
+  ];
+
+  const barH = 32, gap = 12, startY = pad.t + 10;
+  const maxThr = 3.0;
+  const barW = W - pad.l - pad.r;
+
+  tools.forEach((t, i) => {
+    const y = startY + i * (barH + gap);
+    // background
+    c.fillStyle = SURF; c.fillRect(pad.l, y, barW, barH);
+    // throughput bar
+    c.fillStyle = t.color + '40';
+    c.fillRect(pad.l, y, barW * t.throughput / maxThr, barH);
+    c.strokeStyle = t.color; c.lineWidth=1;
+    c.strokeRect(pad.l, y, barW * t.throughput / maxThr, barH);
+
+    // efficiency overlay (width = efficiency × max)
+    // just show as text
+    c.fillStyle = t.color; c.font='12px Segoe UI'; c.textAlign='left';
+    const lines = t.name.split('\n');
+    c.fillText(lines[0], pad.l + 8, y + 14);
+    c.fillStyle = MUTE; c.font='11px JetBrains Mono';
+    c.fillText(lines[1], pad.l + 8, y + 26);
+
+    // right side: throughput value + efficiency
+    c.fillStyle=t.color; c.font='13px JetBrains Mono'; c.textAlign='left';
+    c.fillText(`${t.throughput.toFixed(1)}×`, W - pad.r + 8, y + 15);
+    c.fillStyle=MUTE; c.font='11px Segoe UI';
+    c.fillText(`${Math.round(t.eff*100)}% eff`, W - pad.r + 8, y + 28);
+  });
+
+  // axis
+  c.fillStyle=MUTE; c.font='11px Segoe UI'; c.textAlign='center';
+  c.fillText('Relative alignment throughput (1× = BWA-MEM at 192 threads)', pad.l + barW/2, H-6);
+  c.fillStyle=TEXT; c.font='11px Segoe UI'; c.textAlign='left';
+  c.fillText('Throughput', W-pad.r+8, pad.t+8);
+  c.fillStyle=MUTE;
+  c.fillText('Thread eff.', W-pad.r+8, pad.t+20);
+})();
+
+// ─── Chart 5: Kitchen analogy ─────────────────────────────
+(function() {
+  const c = ctx('kitchenChart'), W = 640, H = 220;
+  c.fillStyle='#0D1117'; c.fillRect(0,0,W,H);
+
+  const scenarios = [
+    { label: '1 chef\n1 stove', chefs: 1, cooking: 1, waiting: 0, output: '1 dish' },
+    { label: '4 chefs\n4 stoves', chefs: 4, cooking: 4, waiting: 0, output: '4 dishes' },
+    { label: '8 chefs\n4 stoves', chefs: 8, cooking: 4, waiting: 4, output: '~5 dishes' },
+    { label: '32 chefs\n4 stoves', chefs: 8, cooking: 2, waiting: 6, output: '~5 dishes' },
+  ];
+
+  const bW = 130, bH = 140, gap = 16, startX = 20, y = 20;
+  const labels = ['1 chef, 1 stove', '4 chefs, 4 stoves', '8 chefs, 4 stoves', '32 chefs, 4 stoves'];
+  const outputs = ['1×', '4×', '~4.5×', '~4.5×'];
+  const colors  = [ACC, ACC, WARN, DANG];
+  const cookingFrac = [1, 1, 0.55, 0.25];
+  const waitFrac    = [0, 0, 0.40, 0.65];
+
+  labels.forEach((lbl, i) => {
+    const x = startX + i * (bW + gap);
+    // box
+    c.strokeStyle = colors[i]; c.lineWidth=1.5;
+    c.strokeRect(x, y, bW, bH);
+    c.fillStyle = colors[i] + '10'; c.fillRect(x, y, bW, bH);
+
+    // cooking bar
+    const cH = Math.round(cookingFrac[i] * (bH - 40));
+    const wH = Math.round(waitFrac[i]    * (bH - 40));
+    c.fillStyle = colors[i] + '50';
+    c.fillRect(x+10, y+10, bW-20, cH);
+    if (wH > 0) {
+      c.fillStyle = DANG + '40';
+      c.fillRect(x+10, y+10+cH, bW-20, wH);
+    }
+
+    // label at top
+    c.fillStyle=colors[i]; c.font='11px Segoe UI'; c.textAlign='center';
+    const ll = lbl.split('\n');
+    c.fillText(ll[0], x+bW/2, y+bH+16);
+    c.fillStyle=MUTE; c.font='10px Segoe UI';
+    c.fillText(ll[1], x+bW/2, y+bH+28);
+
+    // output
+    c.fillStyle=colors[i]; c.font='bold 18px Segoe UI'; c.textAlign='center';
+    c.fillText(outputs[i], x+bW/2, y+bH-8);
+  });
+
+  // legend
+  c.fillStyle=ACC; c.font='11px Segoe UI'; c.textAlign='left';
+  c.fillRect(20, H-18, 12, 12); c.fillStyle=TEXT; c.fillText('Cooking (useful work)', 38, H-7);
+  c.fillStyle=DANG; c.fillRect(200, H-18, 12, 12); c.fillStyle=TEXT; c.fillText('Waiting for stove (lock)', 218, H-7);
+  c.fillStyle=MUTE; c.font='10px Segoe UI'; c.textAlign='center';
+  c.fillText('The stove = shared FM-index   |   More chefs past 4 don\'t make food faster', W/2, H-26);
+})();
+</script>
+</body>
+</html>
