@@ -26,6 +26,8 @@ MIN_VERSIONS: Dict[str, Tuple[int, int]] = {
     "bcftools":  (1, 17),
     "bgzip":     (1, 17),
     "tabix":     (1, 17),
+    "minibwa":   (0, 2),
+    "samtools":  (1, 17),
 }
 
 # Candidate names to try for each logical tool
@@ -39,6 +41,8 @@ TOOL_CANDIDATES: Dict[str, List[str]] = {
     "bcftools": ["bcftools"],
     "bgzip":    ["bgzip"],
     "tabix":    ["tabix"],
+    "minibwa":  ["minibwa"],
+    "samtools": ["samtools"],
 }
 
 

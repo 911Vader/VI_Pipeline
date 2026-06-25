@@ -176,25 +176,50 @@ RESOURCE_SPEC: Dict[str, dict] = {
         "required": False,
         "is_prefix": True,
         "description": (
-            "BWA MEM index prefix (path without extension, e.g. /data/bwa/genome.fa). "
-            "Build with: bwa index <reference.fa>"
+            "Legacy bwa mem 0.7.17 index prefix — superseded by minibwa_index_prefix. "
+            "Kept for reference; pipeline now uses minibwa."
         ),
         "user_hint": (
-            "Prefix path (no extension), e.g. /data/bwa/genome.fa\n"
-            "  The index files genome.fa.amb/.ann/.bwt/.pac/.sa must exist at that prefix.\n"
-            "  Build: bwa index /path/to/genome.fa  (takes ~1 hour for GRCh38)\n"
-            "  Only needed for FASTQ input — VCF input does not use BWA."
+            "This resource is no longer used by the pipeline (minibwa replaced bwa mem).\n"
+            "  Configure minibwa_index_prefix instead."
+        ),
+    },
+    "minibwa_exe": {
+        "required": False,
+        "is_exe": True,
+        "description": "minibwa executable (v0.2+). Required for FASTQ input.",
+        "user_hint": (
+            "Path to the minibwa binary, e.g. /home/user/tools/minibwa/minibwa\n"
+            "  Build: git clone --depth=1 https://github.com/lh3/minibwa.git && make -C minibwa -j8\n"
+            "  Or add minibwa to PATH — setup will find it automatically."
+        ),
+    },
+    "minibwa_index_prefix": {
+        "required": False,
+        "is_prefix": True,
+        "description": (
+            "minibwa index prefix (path without extension, e.g. /data/minibwa/genome). "
+            "Build with: minibwa index -l <reference.fa>"
+        ),
+        "user_hint": (
+            "Prefix path (no extension), e.g. /data/minibwa/genome\n"
+            "  The index files genome.mbw and genome.l2b must exist at that prefix.\n"
+            "  Build: minibwa index -l /path/to/genome.fa  (takes ~40 min for GRCh38)\n"
+            "  The -l flag is required for genomes larger than 2 GB (e.g. hg38).\n"
+            "  Only needed for FASTQ input — VCF input does not use minibwa."
         ),
     },
 }
 
-# All five files that bwa index produces alongside the reference FASTA.
+# All five files that bwa index produces alongside the reference FASTA (legacy).
 _BWA_INDEX_SUFFIXES = (".amb", ".ann", ".bwt", ".pac", ".sa")
 
 # Minimum acceptable size for the .bwt file.  A real GRCh38 .bwt is ~3 GB.
-# 1 MB rules out empty files, tiny pointer/placeholder files, and partial builds
-# while still being orders of magnitude below any legitimate index.
 _BWA_BWT_MIN_BYTES = 1_048_576  # 1 MiB
+
+# minibwa index files: .mbw (main index, ~5.8 GB for GRCh38) and .l2b (lookup table, ~800 MB)
+_MINIBWA_INDEX_SUFFIXES = (".mbw", ".l2b")
+_MINIBWA_MBW_MIN_BYTES = 1_048_576  # 1 MiB
 
 
 class ResourceCheckResult:
@@ -214,41 +239,82 @@ class ResourceCheckResult:
         }
 
 
+def _check_exe_resource(resource: str, path: str, spec: dict) -> ResourceCheckResult:
+    """Validate an executable resource — must exist and be executable."""
+    result = ResourceCheckResult(resource)
+    result.path = path
+    p = Path(path)
+    if not p.exists():
+        result.status = "missing"
+        result.messages.append(
+            f"Executable not found: {path}\n"
+            f"  Expected: {spec['description']}"
+        )
+        return result
+    if not p.is_file():
+        result.status = "bad_format"
+        result.messages.append(f"Path exists but is not a file: {path}")
+        return result
+    import os as _os
+    if not _os.access(path, _os.X_OK):
+        result.status = "bad_format"
+        result.messages.append(f"File is not executable: {path}\n  Run: chmod +x {path}")
+        return result
+    result.status = "found"
+    result.messages.append(f"OK — {path}")
+    return result
+
+
 def _check_prefix_resource(resource: str, path: str, spec: dict) -> ResourceCheckResult:
     """
-    Validate a BWA index prefix by checking that all five required index files
-    exist and that the .bwt file is large enough to be a real index.
+    Validate an index prefix resource.
 
-    A BWA index built from genome.fa produces five files alongside it:
-      genome.fa.amb  genome.fa.ann  genome.fa.bwt  genome.fa.pac  genome.fa.sa
-
-    Validation steps:
-      1. All five files must exist.
-      2. The .bwt file must be at least _BWA_BWT_MIN_BYTES (1 MiB).
-         A real GRCh38 .bwt is ~3 GB; 1 MiB rules out empty or placeholder files
-         without requiring gigabytes to be written in tests.
-
-    Returns status "missing"    if any index file is absent.
-    Returns status "bad_format" if .bwt exists but is too small.
-    Returns status "found"      if all files are present and .bwt is large enough.
+    For bwa_index_prefix: checks .amb/.ann/.bwt/.pac/.sa files exist.
+    For minibwa_index_prefix: checks .mbw and .l2b files exist.
+    Falls back to bwa validation for any unrecognised prefix resource.
     """
     result = ResourceCheckResult(resource)
     result.path = path
 
-    # --- Step 1: all five files must exist ---
+    if resource == "minibwa_index_prefix":
+        missing = [s for s in _MINIBWA_INDEX_SUFFIXES if not Path(path + s).exists()]
+        if missing:
+            result.status = "missing"
+            result.messages.append(
+                f"minibwa index incomplete at prefix: {path}\n"
+                f"  Missing files: {', '.join(path + s for s in missing)}\n"
+                f"  Build the index (takes ~40 min for GRCh38; -l required for large genomes):\n"
+                f"    minibwa index -l <genome.fa> {path}\n"
+                f"  Or point resources.minibwa_index_prefix.path at an existing prefix."
+            )
+            return result
+        mbw_path = Path(path + ".mbw")
+        mbw_size = mbw_path.stat().st_size
+        if mbw_size <= _MINIBWA_MBW_MIN_BYTES:
+            result.status = "bad_format"
+            result.messages.append(
+                f"minibwa index appears to be a placeholder at prefix: {path}\n"
+                f"  {mbw_path.name} is {mbw_size:,} bytes "
+                f"(minimum expected: {_MINIBWA_MBW_MIN_BYTES:,} bytes for a real index)\n"
+                f"  A real GRCh38 .mbw is approximately 5.8 GB.\n"
+                f"  Rebuild: minibwa index -l <genome.fa> {path}"
+            )
+            return result
+        result.status = "found"
+        result.messages.append(f"OK — {path}")
+        return result
+
+    # bwa_index_prefix (legacy) — check five standard bwa files
     missing = [s for s in _BWA_INDEX_SUFFIXES if not Path(path + s).exists()]
     if missing:
         result.status = "missing"
         result.messages.append(
             f"BWA index incomplete at prefix: {path}\n"
             f"  Missing files: {', '.join(path + s for s in missing)}\n"
-            f"  Build the index (takes ~1 hour for GRCh38):\n"
-            f"    bwa index {path}\n"
-            f"  Or point resources.bwa_index_prefix.path at an existing prefix."
+            f"  Note: pipeline now uses minibwa — configure minibwa_index_prefix instead."
         )
         return result
 
-    # --- Step 2: .bwt must be large enough to be a real index ---
     bwt_path = Path(path + ".bwt")
     bwt_size = bwt_path.stat().st_size
     if bwt_size <= _BWA_BWT_MIN_BYTES:
@@ -256,15 +322,12 @@ def _check_prefix_resource(resource: str, path: str, spec: dict) -> ResourceChec
         result.messages.append(
             f"BWA index appears to be a placeholder at prefix: {path}\n"
             f"  {bwt_path.name} is {bwt_size:,} bytes "
-            f"(minimum expected: {_BWA_BWT_MIN_BYTES:,} bytes for a real index)\n"
-            f"  A real GRCh38 .bwt is approximately 3 GB.\n"
-            f"  Build a real index:\n"
-            f"    bwa index {path}"
+            f"(minimum expected: {_BWA_BWT_MIN_BYTES:,} bytes for a real index)"
         )
         return result
 
     result.status = "found"
-    result.messages.append(f"OK — {path}")
+    result.messages.append(f"OK (legacy bwa index) — {path}")
     return result
 
 
@@ -355,7 +418,9 @@ def check_resource(resource: str, path: Optional[str]) -> ResourceCheckResult:
             )
         return result
 
-    if spec.get("is_prefix", False):
+    if spec.get("is_exe", False):
+        return _check_exe_resource(resource, path, spec)
+    elif spec.get("is_prefix", False):
         return _check_prefix_resource(resource, path, spec)
     elif spec.get("is_dir", False):
         return _check_dir_resource(resource, path, spec)

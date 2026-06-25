@@ -561,7 +561,7 @@ def _run_minibwa_align(
         inputs = [r1_input] + ([r2_input] if r2_input else [])
         # fixmate -m adds the ms (mate score) tag required by samtools markdup.
         # minibwa outputs reads in query-name order, which is what fixmate needs.
-        bwa_shell_cmd = (
+        align_shell_cmd = (
             f"set -o pipefail; "
             f"{shlex.quote(minibwa_exe)} map -t {threads} -R {shlex.quote(rg_tag)} "
             f"{shlex.quote(minibwa_index)} {' '.join(inputs)} | "
@@ -575,7 +575,7 @@ def _run_minibwa_align(
             f"{timeout // 3600}h" if timeout else "disabled",
         )
     else:
-        bwa_cmd: List[str] = [
+        align_cmd: List[str] = [
             minibwa_exe, "map",
             "-t", str(threads),
             "-R", rg_tag,
@@ -583,8 +583,8 @@ def _run_minibwa_align(
             fastq_r1,
         ]
         if fastq_r2:
-            bwa_cmd.append(fastq_r2)
-        bwa_shell_cmd = None
+            align_cmd.append(fastq_r2)
+        align_shell_cmd = None
         use_shell = False
         logger.info(
             "minibwa alignment (threads=%d, timeout=%s): pigz not found — using single-threaded decompression",
@@ -602,34 +602,34 @@ def _run_minibwa_align(
     try:
         if use_shell:
             sort_result = subprocess.run(
-                ["bash", "-c", bwa_shell_cmd],
+                ["bash", "-c", align_shell_cmd],
                 capture_output=True,
                 text=True,
                 timeout=timeout if timeout else None,
             )
-            bwa_stderr = ""
-            bwa_returncode = sort_result.returncode
+            align_stderr = ""
+            align_returncode = sort_result.returncode
         else:
-            bwa_proc = subprocess.Popen(
-                bwa_cmd,
+            align_proc = subprocess.Popen(
+                align_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            # Drain BWA stderr in a background thread so the OS pipe buffer
-            # never fills and deadlocks bwa_proc.wait() on long runs.
-            _bwa_stderr_buf: list = []
+            # Drain minibwa stderr in a background thread so the OS pipe buffer
+            # never fills and deadlocks align_proc.wait() on long runs.
+            _align_stderr_buf: list = []
             _stderr_thread = threading.Thread(
-                target=lambda: _bwa_stderr_buf.append(bwa_proc.stderr.read()),
+                target=lambda: _align_stderr_buf.append(align_proc.stderr.read()),
                 daemon=True,
             )
             _stderr_thread.start()
             fixmate_proc = subprocess.Popen(
                 fixmate_cmd,
-                stdin=bwa_proc.stdout,
+                stdin=align_proc.stdout,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            bwa_proc.stdout.close()
+            align_proc.stdout.close()
             sort_result = subprocess.run(
                 sort_cmd,
                 stdin=fixmate_proc.stdout,
@@ -639,10 +639,10 @@ def _run_minibwa_align(
             )
             fixmate_proc.stdout.close()
             fixmate_proc.wait(timeout=30)
-            bwa_proc.wait(timeout=30)
+            align_proc.wait(timeout=30)
             _stderr_thread.join()
-            bwa_stderr = _bwa_stderr_buf[0].decode("utf-8", errors="replace") if _bwa_stderr_buf else ""
-            bwa_returncode = bwa_proc.returncode
+            align_stderr = _align_stderr_buf[0].decode("utf-8", errors="replace") if _align_stderr_buf else ""
+            align_returncode = align_proc.returncode
     except FileNotFoundError as exc:
         raise RuntimeError(
             f"minibwa executable not found at runtime: {minibwa_exe}\n  {exc}"
@@ -654,10 +654,10 @@ def _run_minibwa_align(
             f"  Also consider increasing bwa_threads (currently {threads}) to speed up alignment."
         )
 
-    if bwa_returncode != 0:
-        tail = (sort_result.stderr if use_shell else bwa_stderr).strip().splitlines()[-15:]
+    if align_returncode != 0:
+        tail = (sort_result.stderr if use_shell else align_stderr).strip().splitlines()[-15:]
         raise RuntimeError(
-            f"minibwa alignment failed (exit code {bwa_returncode}).\n"
+            f"minibwa alignment failed (exit code {align_returncode}).\n"
             f"  Last output:\n    " + "\n    ".join(tail)
         )
     if sort_result.returncode != 0:
@@ -1092,7 +1092,7 @@ def run_fastq_to_vcf(
         else:
             logger.warning(
                 "Neither seqkit nor fastp found — skipping FASTQ pair synchronisation. "
-                "BWA may fail with 'paired reads have different names' if reads are desynced. "
+                "minibwa may fail with 'paired reads have different names' if reads are desynced. "
                 "Install seqkit:  conda install -c bioconda seqkit"
             )
 

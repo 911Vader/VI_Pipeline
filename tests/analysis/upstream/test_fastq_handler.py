@@ -1,12 +1,12 @@
 """
 Tests for analysis/upstream/fastq_handler.py
 
-All subprocess calls are mocked — no real alignment or variant calling occurs.
+All subprocess calls are mocked -- no real alignment or variant calling occurs.
 Tests cover:
-  - Tool validation (bwa, samtools missing → RuntimeError)
-  - Resource validation (fasta missing, BWA index missing)
+  - Tool validation (minibwa, samtools missing -> RuntimeError)
+  - Resource validation (fasta missing, minibwa index missing)
   - Docker helper (_get_docker)
-  - BWA alignment failure (non-zero exit, timeout, FileNotFoundError)
+  - minibwa alignment failure (non-zero exit, timeout, FileNotFoundError)
   - samtools index failure
   - DeepVariant failure (non-zero exit, timeout, FileNotFoundError, output missing)
   - Output file not produced
@@ -26,8 +26,9 @@ from analysis.upstream.fastq_handler import (
     _require_tool,
     _get_docker,
     _get_reference_fasta,
-    _get_bwa_index_prefix,
-    _run_bwa_align,
+    _get_minibwa_exe,
+    _get_minibwa_index_prefix,
+    _run_minibwa_align,
     _run_samtools_index,
     _run_deepvariant,
     _detect_gpu,
@@ -41,7 +42,8 @@ from analysis.upstream.fastq_handler import (
 def _make_paths(
     docker_path="/usr/local/bin/docker",
     fasta_path="/data/GRCh38.fa",
-    bwa_index_prefix=None,
+    minibwa_exe_path="/usr/bin/minibwa",
+    minibwa_index_prefix=None,
 ) -> dict:
     def entry(path, status=None):
         if path:
@@ -50,11 +52,12 @@ def _make_paths(
 
     resources = {
         "reference_fasta": entry(fasta_path),
+        "minibwa_exe": entry(minibwa_exe_path),
     }
-    if bwa_index_prefix:
-        resources["bwa_index_prefix"] = entry(bwa_index_prefix)
+    if minibwa_index_prefix:
+        resources["minibwa_index_prefix"] = entry(minibwa_index_prefix)
     else:
-        resources["bwa_index_prefix"] = {"path": None, "status": "not_provided"}
+        resources["minibwa_index_prefix"] = {"path": None, "status": "not_provided"}
 
     return {
         "tools": {
@@ -67,8 +70,6 @@ def _make_paths(
 MINIMAL_PATHS = _make_paths()
 MINIMAL_SETTINGS = {"vep": {"fork": 4}}
 
-_OK_PROC = MagicMock(returncode=0, stdout=b"", stderr=b"")
-
 
 # ---------------------------------------------------------------------------
 # _require_tool
@@ -76,19 +77,19 @@ _OK_PROC = MagicMock(returncode=0, stdout=b"", stderr=b"")
 
 class TestRequireTool:
     def test_found_tool_returns_path(self):
-        with patch("shutil.which", return_value="/usr/bin/bwa"):
-            result = _require_tool("bwa")
-        assert result == "/usr/bin/bwa"
+        with patch("shutil.which", return_value="/usr/bin/samtools"):
+            result = _require_tool("samtools")
+        assert result == "/usr/bin/samtools"
 
     def test_missing_tool_raises_runtime_error(self):
         with patch("shutil.which", return_value=None):
             with pytest.raises(RuntimeError, match="not found on PATH"):
-                _require_tool("bwa")
+                _require_tool("samtools")
 
     def test_error_mentions_tool_name(self):
         with patch("shutil.which", return_value=None):
-            with pytest.raises(RuntimeError, match="bwa"):
-                _require_tool("bwa")
+            with pytest.raises(RuntimeError, match="samtools"):
+                _require_tool("samtools")
 
     def test_error_suggests_conda_install(self):
         with patch("shutil.which", return_value=None):
@@ -132,102 +133,121 @@ class TestGetReferenceFasta:
 
 
 # ---------------------------------------------------------------------------
-# _get_bwa_index_prefix
+# _get_minibwa_exe
 # ---------------------------------------------------------------------------
 
-class TestGetBwaIndexPrefix:
-    def test_explicit_prefix_in_paths_config(self):
-        cfg = _make_paths(bwa_index_prefix="/data/bwa_index/genome.fa")
-        result = _get_bwa_index_prefix(cfg, "/data/GRCh38.fa")
-        assert result == "/data/bwa_index/genome.fa"
+class TestGetMinibwaExe:
+    def test_returns_path_from_paths_config(self):
+        cfg = _make_paths(minibwa_exe_path="/tools/minibwa/minibwa")
+        with patch("pathlib.Path.is_file", return_value=True):
+            result = _get_minibwa_exe(cfg)
+        assert result == "/tools/minibwa/minibwa"
 
-    def test_falls_back_to_fasta_when_index_files_present(self, tmp_path):
+    def test_falls_back_to_which(self):
+        cfg = _make_paths(minibwa_exe_path=None)
+        with patch("shutil.which", return_value="/usr/local/bin/minibwa"):
+            result = _get_minibwa_exe(cfg)
+        assert result == "/usr/local/bin/minibwa"
+
+    def test_missing_raises_runtime_error(self):
+        cfg = _make_paths(minibwa_exe_path=None)
+        with patch("shutil.which", return_value=None):
+            with pytest.raises(RuntimeError, match="minibwa"):
+                _get_minibwa_exe(cfg)
+
+    def test_error_suggests_build_from_source(self):
+        cfg = _make_paths(minibwa_exe_path=None)
+        with patch("shutil.which", return_value=None):
+            with pytest.raises(RuntimeError, match="github.com/lh3/minibwa"):
+                _get_minibwa_exe(cfg)
+
+
+# ---------------------------------------------------------------------------
+# _get_minibwa_index_prefix
+# ---------------------------------------------------------------------------
+
+class TestGetMinibwaIndexPrefix:
+    def test_explicit_prefix_in_paths_config(self):
+        cfg = _make_paths(minibwa_index_prefix="/data/minibwa_index/genome")
+        result = _get_minibwa_index_prefix(cfg, "/data/GRCh38.fa")
+        assert result == "/data/minibwa_index/genome"
+
+    def test_falls_back_to_fasta_when_mbw_present(self, tmp_path):
         fasta = tmp_path / "genome.fa"
         fasta.write_text(">chr1\nACGT\n")
-        for ext in [".amb", ".ann", ".bwt", ".pac", ".sa"]:
-            (tmp_path / f"genome.fa{ext}").write_bytes(b"index")
-        result = _get_bwa_index_prefix(MINIMAL_PATHS, str(fasta))
+        (tmp_path / "genome.fa.mbw").write_bytes(b"index")
+        result = _get_minibwa_index_prefix(MINIMAL_PATHS, str(fasta))
         assert result == str(fasta)
 
     def test_missing_index_raises_runtime_error(self, tmp_path):
         fasta = tmp_path / "genome.fa"
         fasta.write_text(">chr1\nACGT\n")
-        with pytest.raises(RuntimeError, match="BWA index not found"):
-            _get_bwa_index_prefix(MINIMAL_PATHS, str(fasta))
+        with pytest.raises(RuntimeError, match="minibwa index not found"):
+            _get_minibwa_index_prefix(MINIMAL_PATHS, str(fasta))
 
     def test_missing_index_error_shows_build_command(self, tmp_path):
         fasta = tmp_path / "genome.fa"
         fasta.write_text(">chr1\nACGT\n")
-        with pytest.raises(RuntimeError, match="bwa index"):
-            _get_bwa_index_prefix(MINIMAL_PATHS, str(fasta))
-
-    def test_partial_index_raises_runtime_error(self, tmp_path):
-        fasta = tmp_path / "genome.fa"
-        fasta.write_text(">chr1\nACGT\n")
-        for ext in [".amb", ".ann"]:
-            (tmp_path / f"genome.fa{ext}").write_bytes(b"x")
-        with pytest.raises(RuntimeError, match="BWA index not found"):
-            _get_bwa_index_prefix(MINIMAL_PATHS, str(fasta))
+        with pytest.raises(RuntimeError, match="minibwa index -l"):
+            _get_minibwa_index_prefix(MINIMAL_PATHS, str(fasta))
 
     def test_status_not_found_in_config_falls_back_to_fasta(self, tmp_path):
         fasta = tmp_path / "genome.fa"
         fasta.write_text(">chr1\nACGT\n")
-        for ext in [".amb", ".ann", ".bwt", ".pac", ".sa"]:
-            (tmp_path / f"genome.fa{ext}").write_bytes(b"x")
+        (tmp_path / "genome.fa.mbw").write_bytes(b"x")
         cfg = _make_paths(fasta_path=str(fasta))
-        cfg["resources"]["bwa_index_prefix"] = {
-            "path": "/data/index/genome.fa",
+        cfg["resources"]["minibwa_index_prefix"] = {
+            "path": "/data/index/genome",
             "status": "missing",
         }
-        result = _get_bwa_index_prefix(cfg, str(fasta))
+        result = _get_minibwa_index_prefix(cfg, str(fasta))
         assert result == str(fasta)
 
     def test_empty_path_in_config_falls_back_to_fasta(self, tmp_path):
         fasta = tmp_path / "genome.fa"
         fasta.write_text(">chr1\nACGT\n")
-        for ext in [".amb", ".ann", ".bwt", ".pac", ".sa"]:
-            (tmp_path / f"genome.fa{ext}").write_bytes(b"x")
+        (tmp_path / "genome.fa.mbw").write_bytes(b"x")
         cfg = _make_paths(fasta_path=str(fasta))
-        cfg["resources"]["bwa_index_prefix"] = {"path": None, "status": "found"}
-        result = _get_bwa_index_prefix(cfg, str(fasta))
+        cfg["resources"]["minibwa_index_prefix"] = {"path": None, "status": "found"}
+        result = _get_minibwa_index_prefix(cfg, str(fasta))
         assert result == str(fasta)
 
     def test_found_prefix_is_used_not_fasta(self, tmp_path):
         fasta = tmp_path / "genome.fa"
         fasta.write_text(">chr1\nACGT\n")
-        for ext in [".amb", ".ann", ".bwt", ".pac", ".sa"]:
-            (tmp_path / f"genome.fa{ext}").write_bytes(b"x")
-        explicit_prefix = "/data/separate_index/genome.fa"
-        cfg = _make_paths(fasta_path=str(fasta), bwa_index_prefix=explicit_prefix)
-        result = _get_bwa_index_prefix(cfg, str(fasta))
+        (tmp_path / "genome.fa.mbw").write_bytes(b"x")
+        explicit_prefix = "/data/separate_index/genome"
+        cfg = _make_paths(fasta_path=str(fasta), minibwa_index_prefix=explicit_prefix)
+        result = _get_minibwa_index_prefix(cfg, str(fasta))
         assert result == explicit_prefix
 
 
 # ---------------------------------------------------------------------------
-# _run_bwa_align
+# _run_minibwa_align
 # ---------------------------------------------------------------------------
 
-class TestRunBwaAlign:
-    def _call(self, tmp_path, fastq_r2=None, bwa_rc=0, sort_rc=0):
+class TestRunMinibwaAlign:
+    def _call(self, tmp_path, fastq_r2=None, align_rc=0, sort_rc=0):
         sorted_bam = str(tmp_path / "s.sorted.bam")
-        if bwa_rc == 0 and sort_rc == 0:
-            Path(sorted_bam).write_bytes(b"BAM")
 
-        bwa_proc = MagicMock()
-        bwa_proc.stdout = MagicMock()
-        bwa_proc.returncode = bwa_rc
-        bwa_proc.stderr.read.return_value = b"bwa stderr" if bwa_rc != 0 else b""
-        bwa_proc.wait.return_value = None
+        align_proc = MagicMock()
+        align_proc.stdout = MagicMock()
+        align_proc.returncode = align_rc
+        align_proc.stderr.read.return_value = b"minibwa stderr" if align_rc != 0 else b""
+        align_proc.wait.return_value = None
 
         sort_result = MagicMock()
         sort_result.returncode = sort_rc
         sort_result.stderr = "sort stderr" if sort_rc != 0 else ""
 
+        if align_rc == 0 and sort_rc == 0:
+            Path(sorted_bam).write_bytes(b"BAM")
+
         with patch("analysis.upstream.fastq_handler.shutil.which", return_value=None), \
-             patch("subprocess.Popen", return_value=bwa_proc), \
+             patch("subprocess.Popen", return_value=align_proc), \
              patch("subprocess.run", return_value=sort_result):
-            return _run_bwa_align(
-                "/usr/bin/bwa", "/usr/bin/samtools", "/data/genome.fa",
+            return _run_minibwa_align(
+                "/usr/bin/minibwa", "/usr/bin/samtools", "/data/genome",
                 "R1.fastq.gz", fastq_r2,
                 "SAMPLE", sorted_bam, 4,
             )
@@ -240,9 +260,9 @@ class TestRunBwaAlign:
         result = self._call(tmp_path, fastq_r2=None)
         assert result.endswith(".sorted.bam")
 
-    def test_bwa_nonzero_raises_runtime_error(self, tmp_path):
-        with pytest.raises(RuntimeError, match="BWA alignment failed"):
-            self._call(tmp_path, bwa_rc=1)
+    def test_aligner_nonzero_raises_runtime_error(self, tmp_path):
+        with pytest.raises(RuntimeError, match="minibwa alignment failed"):
+            self._call(tmp_path, align_rc=1)
 
     def test_sort_nonzero_raises_runtime_error(self, tmp_path):
         with pytest.raises(RuntimeError, match="samtools sort failed"):
@@ -250,41 +270,44 @@ class TestRunBwaAlign:
 
     def test_bam_not_produced_raises_runtime_error(self, tmp_path):
         sorted_bam = str(tmp_path / "missing.sorted.bam")
-        bwa_proc = MagicMock()
-        bwa_proc.stdout = MagicMock()
-        bwa_proc.returncode = 0
-        bwa_proc.stderr.read.return_value = b""
-        bwa_proc.wait.return_value = None
+        align_proc = MagicMock()
+        align_proc.stdout = MagicMock()
+        align_proc.returncode = 0
+        align_proc.stderr.read.return_value = b""
+        align_proc.wait.return_value = None
         sort_result = MagicMock(returncode=0, stderr="")
-        with patch("subprocess.Popen", return_value=bwa_proc), \
+        with patch("analysis.upstream.fastq_handler.shutil.which", return_value=None), \
+             patch("subprocess.Popen", return_value=align_proc), \
              patch("subprocess.run", return_value=sort_result):
             with pytest.raises(RuntimeError, match="sorted BAM was not produced"):
-                _run_bwa_align(
-                    "/usr/bin/bwa", "/usr/bin/samtools", "/data/genome.fa",
+                _run_minibwa_align(
+                    "/usr/bin/minibwa", "/usr/bin/samtools", "/data/genome",
                     "R1.fastq.gz", None, "SAMPLE", sorted_bam, 4,
                 )
 
     def test_timeout_raises_runtime_error(self, tmp_path):
         sorted_bam = str(tmp_path / "s.sorted.bam")
-        bwa_proc = MagicMock()
-        bwa_proc.stdout = MagicMock()
-        bwa_proc.returncode = 0
-        bwa_proc.stderr.read.return_value = b""
-        bwa_proc.wait.return_value = None
-        with patch("subprocess.Popen", return_value=bwa_proc), \
-             patch("subprocess.run", side_effect=subprocess.TimeoutExpired("bwa", 100)):
+        align_proc = MagicMock()
+        align_proc.stdout = MagicMock()
+        align_proc.returncode = 0
+        align_proc.stderr.read.return_value = b""
+        align_proc.wait.return_value = None
+        with patch("analysis.upstream.fastq_handler.shutil.which", return_value=None), \
+             patch("subprocess.Popen", return_value=align_proc), \
+             patch("subprocess.run", side_effect=subprocess.TimeoutExpired("sort", 100)):
             with pytest.raises(RuntimeError, match="timed out"):
-                _run_bwa_align(
-                    "/usr/bin/bwa", "/usr/bin/samtools", "/data/genome.fa",
+                _run_minibwa_align(
+                    "/usr/bin/minibwa", "/usr/bin/samtools", "/data/genome",
                     "R1.fastq.gz", None, "SAMPLE", sorted_bam, 4,
                 )
 
     def test_file_not_found_raises_runtime_error(self, tmp_path):
         sorted_bam = str(tmp_path / "s.sorted.bam")
-        with patch("subprocess.Popen", side_effect=FileNotFoundError("bwa not found")):
+        with patch("analysis.upstream.fastq_handler.shutil.which", return_value=None), \
+             patch("subprocess.Popen", side_effect=FileNotFoundError("minibwa not found")):
             with pytest.raises(RuntimeError, match="not found at runtime"):
-                _run_bwa_align(
-                    "/nonexistent/bwa", "/usr/bin/samtools", "/data/genome.fa",
+                _run_minibwa_align(
+                    "/nonexistent/minibwa", "/usr/bin/samtools", "/data/genome",
                     "R1.fastq.gz", None, "SAMPLE", sorted_bam, 4,
                 )
 
@@ -367,7 +390,6 @@ class TestRunDeepVariant:
             self._call(tmp_path, raise_timeout=True)
 
     def test_gpu_image_tag_and_flag_in_command(self, tmp_path):
-        """use_gpu=True selects the -gpu image tag and adds --gpus all."""
         out_vcf = str(tmp_path / "SAMPLE.dv.vcf.gz")
         Path(out_vcf).write_bytes(b"BGZF")
         captured = []
@@ -382,7 +404,6 @@ class TestRunDeepVariant:
         assert any("1.10.0-gpu" in t for t in cmd)
 
     def test_cpu_mode_no_gpu_flag(self, tmp_path):
-        """use_gpu=False uses the plain image tag and no --gpus flag."""
         out_vcf = str(tmp_path / "SAMPLE.dv.vcf.gz")
         Path(out_vcf).write_bytes(b"BGZF")
         captured = []
@@ -394,10 +415,9 @@ class TestRunDeepVariant:
             )
         cmd = captured[0]
         assert "--gpus" not in cmd
-        assert any("1.10.0-gpu" in t for t in cmd) is False
+        assert not any("1.10.0-gpu" in t for t in cmd)
 
     def test_disable_small_model_flag_in_command(self, tmp_path):
-        """disable_small_model=True adds --disable_small_model to the DV command."""
         out_vcf = str(tmp_path / "SAMPLE.dv.vcf.gz")
         Path(out_vcf).write_bytes(b"BGZF")
         captured = []
@@ -410,7 +430,6 @@ class TestRunDeepVariant:
         assert "--disable_small_model" in captured[0]
 
     def test_disable_small_model_false_omits_flag(self, tmp_path):
-        """disable_small_model=False (default) does not add --disable_small_model."""
         out_vcf = str(tmp_path / "SAMPLE.dv.vcf.gz")
         Path(out_vcf).write_bytes(b"BGZF")
         captured = []
@@ -449,32 +468,33 @@ class TestDetectGpu:
 
 
 # ---------------------------------------------------------------------------
-# run_fastq_to_vcf — full pipeline (all sub-steps mocked)
+# run_fastq_to_vcf -- full pipeline (all sub-steps mocked)
 # ---------------------------------------------------------------------------
 
 class TestRunFastqToVcf:
     def _run_success(self, tmp_path, fastq_r2=None):
-        raw_vcf = str(tmp_path / "SAMPLE.dv.vcf.gz")
-        sorted_bam = str(tmp_path / "SAMPLE.sorted.bam")
-        Path(sorted_bam).write_bytes(b"BAM")
-        Path(raw_vcf).write_bytes(b"BGZF")
+        out = tmp_path
+        sorted_bam = str(out / "SAMPLE.sorted.bam")
+        dedup_bam  = str(out / "SAMPLE.dedup.bam")
+        raw_vcf    = str(out / "SAMPLE.dv.vcf.gz")
 
-        with patch("shutil.which", return_value="/usr/bin/bwa"), \
+        with patch("analysis.upstream.fastq_handler._get_minibwa_exe", return_value="/usr/bin/minibwa"), \
              patch("analysis.upstream.fastq_handler._require_tool", side_effect=lambda n: f"/usr/bin/{n}"), \
              patch("analysis.upstream.fastq_handler._get_docker", return_value="/usr/local/bin/docker"), \
              patch("analysis.upstream.fastq_handler._get_reference_fasta", return_value="/data/GRCh38.fa"), \
-             patch("analysis.upstream.fastq_handler._get_bwa_index_prefix", return_value="/data/GRCh38.fa"), \
-             patch("analysis.upstream.fastq_handler._run_seqkit_pair", return_value=("R1.fastq.gz", "R2.fastq.gz")), \
-             patch("analysis.upstream.fastq_handler._run_bwa_align", return_value=sorted_bam), \
+             patch("analysis.upstream.fastq_handler._get_minibwa_index_prefix", return_value="/data/genome"), \
+             patch("analysis.upstream.fastq_handler.shutil.which", return_value=None), \
+             patch("analysis.upstream.fastq_handler._run_minibwa_align", return_value=sorted_bam), \
              patch("analysis.upstream.fastq_handler._run_samtools_index"), \
-             patch("analysis.upstream.fastq_handler._run_markdup", return_value=sorted_bam), \
+             patch("analysis.upstream.fastq_handler._run_markdup", return_value=dedup_bam), \
+             patch("analysis.upstream.fastq_handler._run_flagstat"), \
              patch("analysis.upstream.fastq_handler._detect_gpu", return_value=False), \
              patch("analysis.upstream.fastq_handler._run_deepvariant", return_value=raw_vcf):
             return run_fastq_to_vcf(
                 fastq_r1="R1.fastq.gz",
                 fastq_r2=fastq_r2,
                 sample_id="SAMPLE",
-                output_dir=str(tmp_path),
+                output_dir=str(out),
                 paths_config=MINIMAL_PATHS,
                 settings=MINIMAL_SETTINGS,
             )
@@ -487,10 +507,10 @@ class TestRunFastqToVcf:
         result = self._run_success(tmp_path, fastq_r2=None)
         assert result.endswith(".vcf.gz")
 
-    def test_bwa_missing_raises_runtime_error(self, tmp_path):
-        with patch("analysis.upstream.fastq_handler._require_tool",
-                   side_effect=RuntimeError("'bwa' is required for FASTQ processing but was not found on PATH")):
-            with pytest.raises(RuntimeError, match="bwa"):
+    def test_minibwa_missing_raises_runtime_error(self, tmp_path):
+        with patch("analysis.upstream.fastq_handler._get_minibwa_exe",
+                   side_effect=RuntimeError("minibwa executable not found")):
+            with pytest.raises(RuntimeError, match="minibwa"):
                 run_fastq_to_vcf(
                     "R1.fastq.gz", None, "SAMPLE", str(tmp_path),
                     MINIMAL_PATHS, MINIMAL_SETTINGS,
@@ -499,9 +519,13 @@ class TestRunFastqToVcf:
     def test_samtools_missing_raises_runtime_error(self, tmp_path):
         def require_side_effect(name):
             if name == "samtools":
-                raise RuntimeError(f"'{name}' is required for FASTQ processing but was not found on PATH")
+                raise RuntimeError(
+                    f"'{name}' is required for FASTQ processing but was not found on PATH"
+                )
             return f"/usr/bin/{name}"
-        with patch("analysis.upstream.fastq_handler._require_tool", side_effect=require_side_effect):
+
+        with patch("analysis.upstream.fastq_handler._get_minibwa_exe", return_value="/usr/bin/minibwa"), \
+             patch("analysis.upstream.fastq_handler._require_tool", side_effect=require_side_effect):
             with pytest.raises(RuntimeError, match="samtools"):
                 run_fastq_to_vcf(
                     "R1.fastq.gz", None, "SAMPLE", str(tmp_path),
@@ -509,7 +533,8 @@ class TestRunFastqToVcf:
                 )
 
     def test_missing_fasta_raises_runtime_error(self, tmp_path):
-        with patch("analysis.upstream.fastq_handler._require_tool", side_effect=lambda n: f"/usr/bin/{n}"), \
+        with patch("analysis.upstream.fastq_handler._get_minibwa_exe", return_value="/usr/bin/minibwa"), \
+             patch("analysis.upstream.fastq_handler._require_tool", side_effect=lambda n: f"/usr/bin/{n}"), \
              patch("analysis.upstream.fastq_handler._get_docker", return_value="/usr/local/bin/docker"), \
              patch("analysis.upstream.fastq_handler._get_reference_fasta",
                    side_effect=RuntimeError("reference FASTA is required")):
@@ -519,26 +544,29 @@ class TestRunFastqToVcf:
                     MINIMAL_PATHS, MINIMAL_SETTINGS,
                 )
 
-    def test_missing_bwa_index_raises_runtime_error(self, tmp_path):
-        with patch("analysis.upstream.fastq_handler._require_tool", side_effect=lambda n: f"/usr/bin/{n}"), \
+    def test_missing_minibwa_index_raises_runtime_error(self, tmp_path):
+        with patch("analysis.upstream.fastq_handler._get_minibwa_exe", return_value="/usr/bin/minibwa"), \
+             patch("analysis.upstream.fastq_handler._require_tool", side_effect=lambda n: f"/usr/bin/{n}"), \
              patch("analysis.upstream.fastq_handler._get_docker", return_value="/usr/local/bin/docker"), \
              patch("analysis.upstream.fastq_handler._get_reference_fasta", return_value="/data/GRCh38.fa"), \
-             patch("analysis.upstream.fastq_handler._get_bwa_index_prefix",
-                   side_effect=RuntimeError("BWA index not found")):
-            with pytest.raises(RuntimeError, match="BWA index"):
+             patch("analysis.upstream.fastq_handler._get_minibwa_index_prefix",
+                   side_effect=RuntimeError("minibwa index not found")):
+            with pytest.raises(RuntimeError, match="minibwa index"):
                 run_fastq_to_vcf(
                     "R1.fastq.gz", None, "SAMPLE", str(tmp_path),
                     MINIMAL_PATHS, MINIMAL_SETTINGS,
                 )
 
     def test_alignment_failure_propagates(self, tmp_path):
-        with patch("analysis.upstream.fastq_handler._require_tool", side_effect=lambda n: f"/usr/bin/{n}"), \
+        with patch("analysis.upstream.fastq_handler._get_minibwa_exe", return_value="/usr/bin/minibwa"), \
+             patch("analysis.upstream.fastq_handler._require_tool", side_effect=lambda n: f"/usr/bin/{n}"), \
              patch("analysis.upstream.fastq_handler._get_docker", return_value="/usr/local/bin/docker"), \
              patch("analysis.upstream.fastq_handler._get_reference_fasta", return_value="/data/GRCh38.fa"), \
-             patch("analysis.upstream.fastq_handler._get_bwa_index_prefix", return_value="/data/GRCh38.fa"), \
-             patch("analysis.upstream.fastq_handler._run_bwa_align",
-                   side_effect=RuntimeError("BWA alignment failed (exit code 1)")):
-            with pytest.raises(RuntimeError, match="BWA alignment failed"):
+             patch("analysis.upstream.fastq_handler._get_minibwa_index_prefix", return_value="/data/genome"), \
+             patch("analysis.upstream.fastq_handler.shutil.which", return_value=None), \
+             patch("analysis.upstream.fastq_handler._run_minibwa_align",
+                   side_effect=RuntimeError("minibwa alignment failed (exit code 1)")):
+            with pytest.raises(RuntimeError, match="minibwa alignment failed"):
                 run_fastq_to_vcf(
                     "R1.fastq.gz", None, "SAMPLE", str(tmp_path),
                     MINIMAL_PATHS, MINIMAL_SETTINGS,
@@ -546,14 +574,17 @@ class TestRunFastqToVcf:
 
     def test_variant_calling_failure_propagates(self, tmp_path):
         sorted_bam = str(tmp_path / "SAMPLE.sorted.bam")
-        Path(sorted_bam).write_bytes(b"BAM")
-        with patch("analysis.upstream.fastq_handler._require_tool", side_effect=lambda n: f"/usr/bin/{n}"), \
+        dedup_bam  = str(tmp_path / "SAMPLE.dedup.bam")
+        with patch("analysis.upstream.fastq_handler._get_minibwa_exe", return_value="/usr/bin/minibwa"), \
+             patch("analysis.upstream.fastq_handler._require_tool", side_effect=lambda n: f"/usr/bin/{n}"), \
              patch("analysis.upstream.fastq_handler._get_docker", return_value="/usr/local/bin/docker"), \
              patch("analysis.upstream.fastq_handler._get_reference_fasta", return_value="/data/GRCh38.fa"), \
-             patch("analysis.upstream.fastq_handler._get_bwa_index_prefix", return_value="/data/GRCh38.fa"), \
-             patch("analysis.upstream.fastq_handler._run_bwa_align", return_value=sorted_bam), \
+             patch("analysis.upstream.fastq_handler._get_minibwa_index_prefix", return_value="/data/genome"), \
+             patch("analysis.upstream.fastq_handler.shutil.which", return_value=None), \
+             patch("analysis.upstream.fastq_handler._run_minibwa_align", return_value=sorted_bam), \
              patch("analysis.upstream.fastq_handler._run_samtools_index"), \
-             patch("analysis.upstream.fastq_handler._run_markdup", return_value=sorted_bam), \
+             patch("analysis.upstream.fastq_handler._run_markdup", return_value=dedup_bam), \
+             patch("analysis.upstream.fastq_handler._run_flagstat"), \
              patch("analysis.upstream.fastq_handler._detect_gpu", return_value=False), \
              patch("analysis.upstream.fastq_handler._run_deepvariant",
                    side_effect=RuntimeError("DeepVariant exited with code 1")):
@@ -565,16 +596,20 @@ class TestRunFastqToVcf:
 
     def test_output_dir_created(self, tmp_path):
         new_dir = str(tmp_path / "deep" / "nested")
-        raw_vcf_path = str(Path(new_dir) / "SAMPLE.dv.vcf.gz")
+        raw_vcf_path    = str(Path(new_dir) / "SAMPLE.dv.vcf.gz")
         sorted_bam_path = str(Path(new_dir) / "SAMPLE.sorted.bam")
+        dedup_bam_path  = str(Path(new_dir) / "SAMPLE.dedup.bam")
 
-        with patch("analysis.upstream.fastq_handler._require_tool", side_effect=lambda n: f"/usr/bin/{n}"), \
+        with patch("analysis.upstream.fastq_handler._get_minibwa_exe", return_value="/usr/bin/minibwa"), \
+             patch("analysis.upstream.fastq_handler._require_tool", side_effect=lambda n: f"/usr/bin/{n}"), \
              patch("analysis.upstream.fastq_handler._get_docker", return_value="/usr/local/bin/docker"), \
              patch("analysis.upstream.fastq_handler._get_reference_fasta", return_value="/data/GRCh38.fa"), \
-             patch("analysis.upstream.fastq_handler._get_bwa_index_prefix", return_value="/data/GRCh38.fa"), \
-             patch("analysis.upstream.fastq_handler._run_bwa_align", return_value=sorted_bam_path), \
+             patch("analysis.upstream.fastq_handler._get_minibwa_index_prefix", return_value="/data/genome"), \
+             patch("analysis.upstream.fastq_handler.shutil.which", return_value=None), \
+             patch("analysis.upstream.fastq_handler._run_minibwa_align", return_value=sorted_bam_path), \
              patch("analysis.upstream.fastq_handler._run_samtools_index"), \
-             patch("analysis.upstream.fastq_handler._run_markdup", return_value=sorted_bam_path), \
+             patch("analysis.upstream.fastq_handler._run_markdup", return_value=dedup_bam_path), \
+             patch("analysis.upstream.fastq_handler._run_flagstat"), \
              patch("analysis.upstream.fastq_handler._detect_gpu", return_value=False), \
              patch("analysis.upstream.fastq_handler._run_deepvariant", return_value=raw_vcf_path):
             run_fastq_to_vcf(

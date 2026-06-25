@@ -288,7 +288,7 @@ def main() -> int:
                 paths_config=paths_config,
                 settings=settings,
                 stage_callbacks=[
-                    lambda: prog.next("Aligning reads  (BWA)"),
+                    lambda: prog.next("Aligning reads  (minibwa)"),
                     lambda: prog.next("Marking duplicates  (samtools)"),
                     lambda: prog.next("Calling variants  (DeepVariant)"),
                 ],

@@ -179,12 +179,12 @@ deepvariant:
   # Set to 0 to disable the timeout entirely.
   timeout_hours: 0
 
-  # CPU threads for BWA MEM alignment + samtools sort.
-  # Independent of num_shards — BWA runs on the host, not inside Docker.
-  # 64 threads saturates BWA throughput; 192 adds RAM pressure without speed gain.
-  bwa_threads: 64
+  # CPU threads for alignment (minibwa) + samtools sort.
+  # Independent of num_shards — alignment runs on the host, not inside Docker.
+  # minibwa saturates at ~32 threads; setting higher wastes cores with no speed gain.
+  bwa_threads: 32
 
-  # Hard timeout for BWA alignment (hours). Set to 0 to disable.
+  # Hard timeout for alignment (hours). Set to 0 to disable.
   bwa_timeout_hours: 0
 
   # Use only the deep model — disables the small model optimisation.
