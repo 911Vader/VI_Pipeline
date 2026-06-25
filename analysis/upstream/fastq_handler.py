@@ -2,11 +2,11 @@
 fastq_handler.py -- FASTQ to sorted BAM to VCF for VI_Pipeline.
 
 Pipeline steps (all via subprocess):
-  1.  Validate required tools (bwa, samtools) and paths_config resources.
+  1.  Validate required tools (minibwa, samtools) and paths_config resources.
   1b. [paired-end only] fastp pair synchronisation — discards orphaned reads so
-      BWA never encounters mismatched read names across R1 / R2.
-  2.  BWA MEM alignment  ->  samtools sort  ->  sorted BAM.
-  3.  samtools index     ->  BAM index (.bai).
+      the aligner never encounters mismatched read names across R1 / R2.
+  2.  minibwa map alignment  ->  samtools sort  ->  sorted BAM.
+  3.  samtools index         ->  BAM index (.bai).
   3b. Duplicate marking/removal (position-based, coordinate-sorted BAM):
         Tool preference: sambamba  (fastest, fully multithreaded)
                       → picard     (standard, detailed metrics)
@@ -16,7 +16,7 @@ Pipeline steps (all via subprocess):
   4.  DeepVariant (Docker) -> VCF.GZ with high-accuracy variant calls.
 
 Design decisions:
-  - bwa and samtools are located via shutil.which() at call time.
+  - minibwa and samtools are located via paths_config / shutil.which() at call time.
   - Docker is read from paths_config (validated at setup time).
   - DeepVariant is the variant caller.  It runs via the official Docker
     image (google/deepvariant:<version>).  The image is pulled automatically
@@ -24,7 +24,7 @@ Design decisions:
   - Volume mounts: the output directory is mounted as /workdir (rw); the
     reference FASTA directory is mounted as /ref (ro) if it differs from
     the output directory.  No other host paths enter the container.
-  - The reference FASTA and BWA index are read from paths_config.
+  - The reference FASTA and minibwa index are read from paths_config.
   - All intermediate files are written under output_dir / sample_id to
     avoid collisions between parallel runs.
 
@@ -103,6 +103,44 @@ def _get_bcftools(paths_config: dict) -> str:
     return _require_tool("bcftools")
 
 
+def _get_minibwa_exe(paths_config: dict) -> str:
+    """
+    Return the minibwa executable path.
+
+    Resolution order:
+      1. paths_config.resources.minibwa_exe.path  (set by setup or manually)
+      2. shutil.which("minibwa")                   (if minibwa is on PATH)
+
+    Raises RuntimeError with install guidance if not found.
+    """
+    entry = paths_config.get("resources", {}).get("minibwa_exe", {})
+    if isinstance(entry, dict) and entry.get("status") == "found" and entry.get("path"):
+        path = entry["path"]
+        if Path(path).is_file():
+            logger.debug("minibwa located from paths_config: %s", path)
+            return path
+    path = shutil.which("minibwa")
+    if path:
+        logger.debug("minibwa located on PATH: %s", path)
+        return path
+    raise RuntimeError(
+        "minibwa executable not found.\n"
+        "\n"
+        "  Option 1 — add minibwa to PATH:\n"
+        "    export PATH=/path/to/minibwa:$PATH\n"
+        "\n"
+        "  Option 2 — set the path in config/paths.yaml:\n"
+        "    resources:\n"
+        "      minibwa_exe:\n"
+        "        path: /path/to/minibwa\n"
+        "        status: found\n"
+        "\n"
+        "  Build from source (takes ~1 min):\n"
+        "    git clone --depth=1 https://github.com/lh3/minibwa.git\n"
+        "    make -C minibwa -j8"
+    )
+
+
 def _get_reference_fasta(paths_config: dict) -> str:
     """
     Return the GRCh38 reference FASTA path from paths_config.
@@ -121,40 +159,41 @@ def _get_reference_fasta(paths_config: dict) -> str:
     )
 
 
-def _get_bwa_index_prefix(paths_config: dict, fasta_path: str) -> str:
+def _get_minibwa_index_prefix(paths_config: dict, fasta_path: str) -> str:
     """
-    Return the BWA index prefix.
+    Return the minibwa index prefix.
 
-    Tries paths_config.resources.bwa_index_prefix first; falls back to
-    checking whether the standard BWA index files (.amb, .ann, .bwt, .pac,
-    .sa) exist alongside the reference FASTA.
+    Tries paths_config.resources.minibwa_index_prefix first; falls back to
+    checking whether minibwa index files (.mbw, .l2b) exist alongside the
+    reference FASTA.
 
     Raises RuntimeError if no index is found.
     """
-    entry = paths_config.get("resources", {}).get("bwa_index_prefix", {})
+    entry = paths_config.get("resources", {}).get("minibwa_index_prefix", {})
     if isinstance(entry, dict) and entry.get("status") == "found" and entry.get("path"):
         prefix = entry["path"]
-        logger.debug("Using bwa_index_prefix from paths_config: %s", prefix)
+        logger.debug("Using minibwa_index_prefix from paths_config: %s", prefix)
         return prefix
 
-    required_suffixes = [".amb", ".ann", ".bwt", ".pac", ".sa"]
-    missing = [s for s in required_suffixes if not Path(fasta_path + s).exists()]
-    if not missing:
-        logger.debug("BWA index found alongside reference FASTA: %s", fasta_path)
+    if Path(fasta_path + ".mbw").exists():
+        logger.debug("minibwa index found alongside reference FASTA: %s", fasta_path)
         return fasta_path
 
     raise RuntimeError(
-        f"BWA index not found for reference FASTA: {fasta_path}\n"
+        f"minibwa index not found for reference FASTA: {fasta_path}\n"
         f"\n"
-        f"  Missing index files: {', '.join(missing)}\n"
+        f"  To build the index (takes ~40 min for GRCh38; use -l for large genomes):\n"
+        f"    minibwa index -l {fasta_path}\n"
         f"\n"
-        f"  To build the index (this takes ~1 hour for GRCh38):\n"
-        f"    bwa index {fasta_path}\n"
+        f"  Or add the path to a pre-built minibwa index prefix to\n"
+        f"  config/paths.yaml under resources.minibwa_index_prefix.path:\n"
+        f"    resources:\n"
+        f"      minibwa_index_prefix:\n"
+        f"        path: /path/to/index/genome\n"
+        f"        status: found\n"
         f"\n"
-        f"  Alternatively, add the path to a pre-built BWA index prefix to\n"
-        f"  config/paths.yaml under resources.bwa_index_prefix.path, then\n"
-        f"  re-run setup:\n"
-        f"    python cli.py --setup"
+        f"  Note: the index prefix is the path without file extension\n"
+        f"  (e.g. /data/index/genome produces genome.mbw and genome.l2b)."
     )
 
 
@@ -477,10 +516,10 @@ def _run_fastp_repair(
     return out_r1, out_r2
 
 
-def _run_bwa_align(
-    bwa_exe: str,
+def _run_minibwa_align(
+    minibwa_exe: str,
     samtools_exe: str,
-    bwa_index: str,
+    minibwa_index: str,
     fastq_r1: str,
     fastq_r2: Optional[str],
     sample_id: str,
@@ -489,17 +528,17 @@ def _run_bwa_align(
     timeout: int = _ALIGN_TIMEOUT,
 ) -> str:
     """
-    Align FASTQ reads with BWA MEM and pipe directly through samtools sort.
+    Align FASTQ reads with minibwa map and pipe directly through samtools sort.
 
     Command (paired-end):
-        bwa mem -t {threads} -R "@RG\\tID:{id}\\tSM:{id}\\tPL:ILLUMINA" \\
+        minibwa map -t {threads} -R "@RG\\tID:{id}\\tSM:{id}\\tPL:ILLUMINA" \\
             {index} R1.fastq.gz R2.fastq.gz | samtools sort -@ {threads} -o {sorted_bam}
 
     Returns the path to the sorted BAM.
     """
     rg_tag = f"@RG\\tID:{sample_id}\\tSM:{sample_id}\\tPL:ILLUMINA\\tLB:{sample_id}"
 
-    # Use pigz for parallel decompression of gzipped FASTQs — BWA's built-in
+    # Use pigz for parallel decompression of gzipped FASTQs — minibwa's built-in
     # gzip reader is single-threaded and starves alignment threads on large files.
     pigz_exe = shutil.which("pigz")
 
@@ -521,26 +560,26 @@ def _run_bwa_align(
             r2_input = f"<(pigz -dc -p {decomp_threads} {shlex.quote(fastq_r2)})"
         inputs = [r1_input] + ([r2_input] if r2_input else [])
         # fixmate -m adds the ms (mate score) tag required by samtools markdup.
-        # BWA MEM outputs reads in query-name order, which is what fixmate needs.
+        # minibwa outputs reads in query-name order, which is what fixmate needs.
         bwa_shell_cmd = (
             f"set -o pipefail; "
-            f"{shlex.quote(bwa_exe)} mem -t {threads} -R {shlex.quote(rg_tag)} "
-            f"{shlex.quote(bwa_index)} {' '.join(inputs)} | "
+            f"{shlex.quote(minibwa_exe)} map -t {threads} -R {shlex.quote(rg_tag)} "
+            f"{shlex.quote(minibwa_index)} {' '.join(inputs)} | "
             f"{shlex.quote(samtools_exe)} fixmate -m -O bam - - | "
             f"{shlex.quote(samtools_exe)} sort -@ {threads} -o {shlex.quote(sorted_bam)}"
         )
         use_shell = True
         logger.info(
-            "BWA alignment with pigz decompression (bwa_threads=%d, decomp_threads=%d, timeout=%s)",
+            "minibwa alignment with pigz decompression (threads=%d, decomp_threads=%d, timeout=%s)",
             threads, decomp_threads,
             f"{timeout // 3600}h" if timeout else "disabled",
         )
     else:
         bwa_cmd: List[str] = [
-            bwa_exe, "mem",
+            minibwa_exe, "map",
             "-t", str(threads),
             "-R", rg_tag,
-            bwa_index,
+            minibwa_index,
             fastq_r1,
         ]
         if fastq_r2:
@@ -548,7 +587,7 @@ def _run_bwa_align(
         bwa_shell_cmd = None
         use_shell = False
         logger.info(
-            "BWA alignment (threads=%d, timeout=%s): pigz not found — using single-threaded decompression",
+            "minibwa alignment (threads=%d, timeout=%s): pigz not found — using single-threaded decompression",
             threads,
             f"{timeout // 3600}h" if timeout else "disabled",
         )
@@ -606,11 +645,11 @@ def _run_bwa_align(
             bwa_returncode = bwa_proc.returncode
     except FileNotFoundError as exc:
         raise RuntimeError(
-            f"BWA executable not found at runtime: {bwa_exe}\n  {exc}"
+            f"minibwa executable not found at runtime: {minibwa_exe}\n  {exc}"
         ) from exc
     except subprocess.TimeoutExpired:
         raise RuntimeError(
-            f"BWA alignment timed out after {timeout // 3600} hours.\n"
+            f"minibwa alignment timed out after {timeout // 3600} hours.\n"
             f"  Increase bwa_timeout_hours in config/settings.yaml, or set it to 0 to disable.\n"
             f"  Also consider increasing bwa_threads (currently {threads}) to speed up alignment."
         )
@@ -618,7 +657,7 @@ def _run_bwa_align(
     if bwa_returncode != 0:
         tail = (sort_result.stderr if use_shell else bwa_stderr).strip().splitlines()[-15:]
         raise RuntimeError(
-            f"BWA alignment failed (exit code {bwa_returncode}).\n"
+            f"minibwa alignment failed (exit code {bwa_returncode}).\n"
             f"  Last output:\n    " + "\n    ".join(tail)
         )
     if sort_result.returncode != 0:
@@ -630,7 +669,7 @@ def _run_bwa_align(
 
     if not Path(sorted_bam).exists():
         raise RuntimeError(
-            f"BWA/samtools sort completed but sorted BAM was not produced.\n"
+            f"minibwa/samtools sort completed but sorted BAM was not produced.\n"
             f"  Expected: {sorted_bam}"
         )
 
@@ -964,11 +1003,11 @@ def run_fastq_to_vcf(
                   pipeline step exits non-zero.
     """
     # --- Validate and locate tools ---
-    bwa_exe      = _require_tool("bwa")
+    minibwa_exe  = _get_minibwa_exe(paths_config)
     samtools_exe = _require_tool("samtools")
     docker_exe   = _get_docker(paths_config)
     fasta_path   = _get_reference_fasta(paths_config)
-    bwa_index    = _get_bwa_index_prefix(paths_config, fasta_path)
+    minibwa_index = _get_minibwa_index_prefix(paths_config, fasta_path)
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -1000,7 +1039,7 @@ def run_fastq_to_vcf(
     mode = "paired-end" if fastq_r2 else "single-end"
     logger.info(
         "FASTQ -> VCF  sample=%s  mode=%s  caller=DeepVariant-%s  shards=%d  "
-        "bwa_threads=%d  bwa_timeout=%s",
+        "align_threads=%d  align_timeout=%s  aligner=minibwa",
         sample_id, mode, version, dv_threads, bwa_threads,
         f"{bwa_timeout // 3600}h" if bwa_timeout else "disabled",
     )
@@ -1070,10 +1109,10 @@ def run_fastq_to_vcf(
             and _bam_is_intact(samtools_exe, sorted_bam)):
         logger.info("Resuming: sorted BAM already exists — skipping alignment: %s", sorted_bam)
     else:
-        _run_bwa_align(
-            bwa_exe=bwa_exe,
+        _run_minibwa_align(
+            minibwa_exe=minibwa_exe,
             samtools_exe=samtools_exe,
-            bwa_index=bwa_index,
+            minibwa_index=minibwa_index,
             fastq_r1=fastq_r1,
             fastq_r2=fastq_r2,
             sample_id=sample_id,
