@@ -315,7 +315,7 @@ class App(tb.Window):
             r = i + 2
 
             tk.Label(content, text=label, bg=_SURFACE, fg=_TEXT,
-                     font=(_FONT_UI, _SZ), anchor="w", width=22).grid(
+                     font=(_FONT_UI, _SZ), anchor="w", width=26).grid(
                 row=r, column=0, sticky="w", padx=(_PAD, _PADS), pady=(8, 3))
 
             var = tk.StringVar()
@@ -1383,7 +1383,7 @@ class App(tb.Window):
 
     def _build_vep_filter_command(self, values: dict, out: str,
                                    annotated_vcf: str | None = None) -> list:
-        script = str(Path(__file__).parent.parent / "vep_filter.sh")
+        script = str(Path(__file__).parent.parent / "scripts" / "vep_filter.sh")
         subset_out = str(Path(out) / "vep_filter")
         # Use the annotated VCF if available — avoids re-running VEP
         input_vcf = annotated_vcf if annotated_vcf else values["input"].strip()
